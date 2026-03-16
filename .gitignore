@@ -1,0 +1,15 @@
+# Claude Overtime runtime state (regenerated at runtime)
+.claude/overtime/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
