@@ -1,0 +1,17 @@
+{
+  "name": "claude-overtime",
+  "version": "1.0.0",
+  "description": "Warns when approaching Claude rate limit and auto-continues your session overnight using /overtime",
+  "bin": {
+    "claude-overtime": "./bin/claude-overtime.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/claude-overtime.js install --silent || true"
+  },
+  "keywords": ["claude", "claude-code", "rate-limit", "productivity"],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
