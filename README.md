@@ -38,17 +38,17 @@ Run this in any Claude Code session when you're about to (or have just) hit your
 /overtime
 ```
 
-Claude will:
-1. Save the current task + next steps to `.claude/overtime-plan.md`
-2. Run `caffeinate` (macOS) or `systemd-inhibit` (Linux) to prevent your machine from sleeping
-3. Set up a `/loop` that picks up the plan every 10 minutes until the rate limit resets and all work is done
-4. Kill `caffeinate` automatically when the plan is complete
+Defaults to resuming in **5 hours**. Claude will keep your machine awake and pick up the conversation exactly where it left off — no summary, no plan file, just continuation.
 
-You can also pass context:
+You can specify a custom delay:
 
 ```
-/overtime finish the auth refactor, we still need to write tests for the JWT middleware
+/overtime 1h
+/overtime 90m
+/overtime 2h30m
 ```
+
+Supported formats: `Nh` (hours), `Nm` (minutes), `NhMm` (combined), plain number = minutes.
 
 ### Rate limit warning
 
@@ -111,8 +111,8 @@ Removes the command, hook, and settings.json entry cleanly.
 
 1. It's 11pm. You're deep in a feature.
 2. You see the `⚠️ 95%` warning.
-3. You type `/overtime`.
-4. Claude saves the plan and starts `caffeinate`.
+3. You type `/overtime` (or `/overtime 1h` if you know your limit resets in an hour).
+4. Claude starts `caffeinate` and sets a timer.
 5. You go to sleep.
-6. Rate limit resets in ~1 hour. Claude picks up automatically.
+6. Timer fires. Claude resumes right where the conversation left off.
 7. You wake up in the morning. The feature is done. `caffeinate` has been killed.

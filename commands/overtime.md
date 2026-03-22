@@ -1,61 +1,65 @@
-You are entering **overtime mode**. The user has hit (or is about to hit) their Claude rate limit and wants to continue the current task automatically when it resets — typically overnight.
-
-Follow these steps in order:
+You are entering **overtime mode**. The user wants to pause and automatically resume the current conversation after a delay.
 
 ---
 
-### 1. Save the current plan
+### Parse the delay from `$ARGUMENTS`
 
-Write a markdown snapshot of everything in progress to `.claude/overtime-plan.md`. Include:
-- What task is being worked on
-- What has already been completed
-- The exact next steps remaining (numbered, actionable)
-- Any blockers or decisions that still need to be made
-- Any relevant file paths, branch names, or context
+`$ARGUMENTS` may be empty or contain a time value such as `1h`, `90m`, `2h30m`, `30`, etc.
 
-If `$ARGUMENTS` is non-empty, treat it as additional context or override instructions for what to continue.
+- If `$ARGUMENTS` is empty or not a valid time, default to **5 hours**.
+- Parse the value:
+  - Plain number (e.g. `30`) → minutes
+  - `Nm` or `Nmin` → minutes
+  - `Nh` or `Nhour` → hours
+  - `NhMm` (e.g. `2h30m`) → hours + minutes
+- Convert to total seconds for use in the `sleep` command below.
+- Format a human-readable label (e.g. "5 hours", "90 minutes", "2h 30m") for the confirmation message.
 
 ---
 
-### 2. Keep the machine awake
+### 1. Keep the machine awake
 
-Run the appropriate caffeinate command for the platform:
+Run the appropriate caffeinate command for the platform. Detect with `uname`.
 
 **macOS:**
 ```bash
 nohup caffeinate -d > /tmp/claude-overtime-caffeinate.log 2>&1 &
 echo $! > /tmp/claude-overtime-caffeinate.pid
-echo "caffeinate started (PID $(cat /tmp/claude-overtime-caffeinate.pid))"
 ```
 
 **Linux:**
 ```bash
-nohup systemd-inhibit --what=idle --who="claude-overtime" --why="Waiting for rate limit reset" sleep 7200 > /tmp/claude-overtime-caffeinate.log 2>&1 &
+nohup systemd-inhibit --what=idle --who="claude-overtime" --why="Waiting for overtime delay" sleep infinity > /tmp/claude-overtime-caffeinate.log 2>&1 &
 echo $! > /tmp/claude-overtime-caffeinate.pid
-echo "sleep inhibitor started (PID $(cat /tmp/claude-overtime-caffeinate.pid))"
-```
-
-Detect the platform with `uname` and run the right one.
-
----
-
-### 3. Set up a continuation loop
-
-Use the `loop` skill to resume automatically. Run:
-
-```
-/loop 10m Continue the implementation plan saved in .claude/overtime-plan.md — pick up exactly where it left off, executing the next pending step. When all steps are complete, kill the caffeinate process: kill $(cat /tmp/claude-overtime-caffeinate.pid) 2>/dev/null; rm -f /tmp/claude-overtime-caffeinate.pid
 ```
 
 ---
 
-### 4. Confirm to the user
+### 2. Set a timer and resume
 
-Print a short confirmation message, for example:
+Run a background command that sleeps for the computed delay, then uses the `loop` skill to trigger a single immediate continuation:
 
-> **Overtime mode activated.**
-> Plan saved to `.claude/overtime-plan.md`. Your machine will stay awake and I'll continue automatically when the rate limit resets (~1 hour). Go to sleep — I've got it from here.
+```bash
+DELAY_SECONDS=<computed>
+(sleep $DELAY_SECONDS && echo "overtime: delay complete, resuming...") &
+echo $! > /tmp/claude-overtime-timer.pid
+```
+
+Then invoke the loop skill to pick up at the right time:
+
+```
+/loop <delay> Pick up exactly where we left off in this conversation. Continue whatever task or discussion was in progress — do not re-explain or summarize first, just resume. When the work is fully done, run: kill $(cat /tmp/claude-overtime-caffeinate.pid) 2>/dev/null; rm -f /tmp/claude-overtime-caffeinate.pid /tmp/claude-overtime-timer.pid
+```
+
+Where `<delay>` is the parsed value expressed in a format the loop skill understands (e.g. `5h`, `90m`, `2h30m`).
 
 ---
 
-If $ARGUMENTS is set, append it to the task context when saving the plan.
+### 3. Confirm to the user
+
+Print a brief confirmation, for example:
+
+> **Overtime mode activated — resuming in 5 hours.**
+> Your machine will stay awake. I'll pick up right where we left off. Go to sleep.
+
+Keep it to 2–3 lines. Do not summarize the current task or write any files.
