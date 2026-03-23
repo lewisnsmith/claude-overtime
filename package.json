@@ -3,16 +3,21 @@
   "version": "1.0.0",
   "description": "Warns when approaching Claude rate limit and auto-continues your session overnight using /overtime",
   "bin": {
-    "claude-overtime": "./bin/claude-overtime.js"
+    "claude-overtime": "bin/claude-overtime.js"
   },
   "scripts": {
     "postinstall": "node bin/claude-overtime.js install --silent || true"
   },
-  "keywords": ["claude", "claude-code", "rate-limit", "productivity"],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "rate-limit",
+    "productivity"
+  ],
   "author": "lewisnsmith",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lewisnsmith/claude-overtime"
+    "url": "git+https://github.com/lewisnsmith/claude-overtime.git"
   },
   "license": "MIT",
   "engines": {
