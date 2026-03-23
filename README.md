@@ -1,141 +1,118 @@
-# Claude Overtime
+# claude-overtime
 
-> Type `/overtime`, go to sleep. Wake up to completed work.
+Stop losing your late-night Claude sessions to rate limits.
 
-**Claude Overtime** is a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin that enables unattended, rate-limit-resilient coding sessions. When activated via the `/overtime` slash command, it keeps your machine awake, monitors for rate limits, and automatically retries — so Claude keeps working while you're AFK.
+**claude-overtime** does two things:
+
+1. **Warns you at ~95% of your hourly token limit** — a desktop notification + terminal banner so you always see it coming.
+2. **`/overtime` command** — saves your current plan, keeps your machine awake with `caffeinate`, and loops automatically to continue your session when the rate limit resets.
 
 ---
 
-## Features
-
-- **🚀 `/overtime` Slash Command** — One command to enter autonomous mode
-- **☕ Caffeinate Integration** — Prevents your Mac from sleeping while tasks run
-- **🔄 Rate Limit Recovery** — Detects rate limits, waits for reset, and resumes automatically
-- **📋 Task Queue** — Queue multiple prompts for sequential execution
-- **📝 Session Summary** — Get a full report of what Claude did while you were away
-- **🛡️ Git Safety Net** — Auto-commits to a branch before each task for easy rollback
-
-## Installation
-
-### 1. Clone this repo into your project
+## Install
 
 ```bash
-# From your project root
-git clone https://github.com/lewisnsmith/claude-overtime.git .claude-overtime-tmp
-cp -r .claude-overtime-tmp/.claude .claude
-rm -rf .claude-overtime-tmp
+npm install -g claude-overtime
 ```
 
-### 2. Or copy the files manually
+`postinstall` automatically runs `claude-overtime install`, which:
+- Copies the `/overtime` slash command to `~/.claude/commands/overtime.md`
+- Installs the rate-limit warning hook to `~/.claude/hooks/`
+- Registers the `Stop` hook in `~/.claude/settings.json`
 
-Copy the following directories into your project:
+Or install manually:
 
-```
-.claude/
-├── commands/
-│   └── overtime.md
-└── skills/
-    └── overtime/
-        ├── SKILL.md
-        └── scripts/
-            ├── overtime-daemon.sh
-            ├── caffeinate-mgr.sh
-            ├── queue-mgr.sh
-            ├── rate-limit-parser.sh
-            └── summary-gen.sh
+```bash
+claude-overtime install
 ```
 
-### 3. Prerequisites
-
-- **macOS** (Linux support planned)
-- **Claude Code** installed and authenticated
-- **`jq`** for JSON processing: `brew install jq`
+---
 
 ## Usage
 
-### Start an overtime session
+### `/overtime`
+
+Run this in any Claude Code session when you're about to (or have just) hit your rate limit:
 
 ```
-> /overtime
+/overtime
 ```
 
-Activates overtime mode for your current task. Claude continues working through rate limits.
+Defaults to resuming in **5 hours**. Claude will keep your machine awake and pick up the conversation exactly where it left off — no summary, no plan file, just continuation.
 
-### Queue a specific task
+You can specify a custom delay:
 
 ```
-> /overtime refactor the auth module to use JWT
+/overtime 1h
+/overtime 90m
+/overtime 2h30m
 ```
 
-Adds the task to the queue and begins processing.
+Supported formats: `Nh` (hours), `Nm` (minutes), `NhMm` (combined), plain number = minutes.
 
-### Check status
+### Rate limit warning
 
-```bash
-# From another terminal
-./claude/skills/overtime/scripts/overtime-daemon.sh --status
+The warning fires automatically — you don't need to do anything. When you approach your limit you'll see:
+
+```
+╔══════════════════════════════════════════════════════╗
+║  ⚠️  claude-overtime: rate limit ~95% reached        ║
+║  Run /overtime to continue your session overnight.  ║
+╚══════════════════════════════════════════════════════╝
 ```
 
-### Cancel overtime
+Plus a desktop notification (macOS: Notification Center, Linux: `notify-send`).
 
-```bash
-# From another terminal
-./claude/skills/overtime/scripts/overtime-daemon.sh --cancel
-```
+---
 
 ## Configuration
 
-Edit `.claude/overtime/config.json` to customize:
+Set a custom warning threshold (default: 90,000 tokens ≈ 95% of a typical hourly limit):
 
-```json
-{
-  "max_retries": 10,
-  "max_runtime_hours": 8,
-  "retry_buffer_seconds": 60,
-  "fallback_retry_minutes": 300,
-  "auto_commit": true,
-  "auto_commit_prefix": "[overtime]",
-  "notify_on_complete": true,
-  "notify_on_error": true,
-  "log_level": "info"
-}
+```bash
+export CLAUDE_OVERTIME_WARN_AT=80000
 ```
 
-## ⚠️ Risk Acknowledgement
+Add this to your `.zshrc` / `.bashrc` to persist it.
 
-Claude Overtime runs with `--dangerously-skip-permissions`. This means Claude will **execute file writes, shell commands, and other operations without asking for confirmation**. This is the core tradeoff: maximum autonomy for maximum throughput when you're AFK.
+---
 
-**Recommended safeguards:**
-- Always run on a dedicated git branch (overtime does this automatically)
-- Review the generated summary and diffs when you return
-- Set `max_runtime_hours` to a reasonable limit
-- Plug in your laptop — caffeinate will keep it awake
+## How it works
 
-## How It Works
+| Component | What it does |
+|---|---|
+| `hooks/rate-limit-warn.sh` | Runs on every Claude `Stop` event, tracks cumulative token usage for the session, fires warning at threshold |
+| `commands/overtime.md` | The `/overtime` slash command — instructs Claude to snapshot the plan, start caffeinate, and loop |
+| `bin/claude-overtime.js` | CLI for install / uninstall / status |
 
-```
-You type /overtime
-       │
-       ▼
-┌─────────────────────┐
-│  overtime.md        │  Slash command activates the system
-│  (Slash Command)    │
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│  overtime-daemon.sh │  Background daemon monitors Claude
-│  (Main Loop)        │  Detects rate limits, retries, queues
-└────────┬────────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌────────┐ ┌──────────┐
-│caffeinate│ │queue.json│
-│(awake)  │ │(tasks)   │
-└────────┘ └──────────┘
+Token usage is accumulated in `~/.claude/overtime-token-state.json` and resets each new session.
+
+---
+
+## Uninstall
+
+```bash
+claude-overtime uninstall
 ```
 
-## License
+Removes the command, hook, and settings.json entry cleanly.
 
-MIT — see [LICENSE](LICENSE).
+---
+
+## Requirements
+
+- [Claude Code](https://claude.ai/code) CLI
+- Node.js 18+
+- macOS (uses `caffeinate`) or Linux with `systemd-inhibit`
+
+---
+
+## The typical workflow
+
+1. It's 11pm. You're deep in a feature.
+2. You see the `⚠️ 95%` warning.
+3. You type `/overtime` (or `/overtime 1h` if you know your limit resets in an hour).
+4. Claude starts `caffeinate` and sets a timer.
+5. You go to sleep.
+6. Timer fires. Claude resumes right where the conversation left off.
+7. You wake up in the morning. The feature is done. `caffeinate` has been killed.

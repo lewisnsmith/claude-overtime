@@ -1,28 +1,21 @@
 {
   "name": "claude-overtime",
-  "version": "0.1.0",
-  "description": "A Claude Code plugin that enables unattended, rate-limit-resilient coding sessions via the /overtime slash command.",
-  "author": "Lewis Smith",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/lewisnsmith/claude-overtime.git"
-  },
-  "keywords": [
-    "claude",
-    "claude-code",
-    "plugin",
-    "automation",
-    "rate-limit",
-    "caffeinate"
-  ],
+  "version": "1.0.0",
+  "description": "Warns when approaching Claude rate limit and auto-continues your session overnight using /overtime",
   "bin": {
-    "overtime": ".claude/skills/overtime/scripts/overtime-daemon.sh"
+    "claude-overtime": "./bin/claude-overtime.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "postinstall": "node bin/claude-overtime.js install --silent || true"
   },
+  "keywords": ["claude", "claude-code", "rate-limit", "productivity"],
+  "author": "lewisnsmith",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lewisnsmith/claude-overtime"
+  },
+  "license": "MIT",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18"
   }
 }
