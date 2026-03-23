@@ -5,7 +5,7 @@ Stop losing your late-night Claude sessions to rate limits.
 **claude-overtime** does two things:
 
 1. **Warns you at ~95% of your hourly token limit** — a desktop notification + terminal banner so you always see it coming.
-2. **`/overtime` command** — saves your current plan, keeps your machine awake with `caffeinate`, and loops automatically to continue your session when the rate limit resets.
+2. **`/overtime` command** — grants temporary unattended permissions, keeps your machine awake with `caffeinate`, and loops automatically to continue your session when the rate limit resets. No permission prompts to stall at 3am.
 
 ---
 
@@ -38,7 +38,10 @@ Run this in any Claude Code session when you're about to (or have just) hit your
 /overtime
 ```
 
-Defaults to resuming in **5 hours**. Claude will keep your machine awake and pick up the conversation exactly where it left off — no summary, no plan file, just continuation.
+Defaults to resuming in **5 hours**. Claude will:
+- Grant temporary project-scoped permissions (so it doesn't stall on approval prompts overnight)
+- Keep your machine awake
+- Pick up the conversation exactly where it left off — no summary, no plan file, just continuation
 
 You can specify a custom delay:
 
@@ -82,10 +85,20 @@ Add this to your `.zshrc` / `.bashrc` to persist it.
 | Component | What it does |
 |---|---|
 | `hooks/rate-limit-warn.sh` | Runs on every Claude `Stop` event, tracks cumulative token usage for the session, fires warning at threshold |
-| `commands/overtime.md` | The `/overtime` slash command — instructs Claude to snapshot the plan, start caffeinate, and loop |
+| `commands/overtime.md` | The `/overtime` slash command — grants permissions, starts caffeinate, and loops |
 | `bin/claude-overtime.js` | CLI for install / uninstall / status |
 
 Token usage is accumulated in `~/.claude/overtime-token-state.json` and resets each new session.
+
+### Unattended permissions
+
+When you run `/overtime`, Claude writes a temporary `.claude/settings.local.json` in the project with broad tool permissions (`Bash(*)`, `Edit`, `Write`, etc.) so the resumed session can work without prompts.
+
+**Safety rails:**
+- Destructive commands are still denied (`rm -rf /`, `git push --force`, `git reset --hard`, `git clean -f`)
+- Claude is scoped to only finish the in-progress task — no new work, no pushing to remote, no changes outside the project
+- Permissions are **automatically removed** when the task completes
+- If the file already existed, only the `permissions` key is removed on cleanup — your other settings are preserved
 
 ---
 
