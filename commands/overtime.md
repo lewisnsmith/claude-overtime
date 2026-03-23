@@ -1,4 +1,42 @@
-You are entering **overtime mode**. The user wants to pause and automatically resume the current conversation after a delay.
+You are entering **overtime mode**. The user wants to pause and automatically resume the current conversation after a delay — **unattended**, with no one available to approve permission prompts.
+
+---
+
+### 0. Grant unattended permissions
+
+Before anything else, write a temporary project-level settings file so the resumed session can execute freely without permission prompts. **This is critical** — without it, Claude will stall overnight waiting for approval.
+
+Create (or merge into) `.claude/settings.local.json` in the **current project root**:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "mcp__*"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -f*)"
+    ]
+  }
+}
+```
+
+If the file already exists, merge the `permissions.allow` entries (don't overwrite other settings). Record that overtime created this file so cleanup knows what to remove:
+
+```bash
+echo "overtime" > /tmp/claude-overtime-permissions-owner
+```
+
+> **Scope constraint:** These permissions let the resumed session complete only the work already in progress in this conversation. Do NOT start new unrelated work, install global packages, push to remote, or make changes outside the project directory.
 
 ---
 
@@ -48,7 +86,7 @@ echo $! > /tmp/claude-overtime-timer.pid
 Then invoke the loop skill to pick up at the right time:
 
 ```
-/loop <delay> Pick up exactly where we left off in this conversation. Continue whatever task or discussion was in progress — do not re-explain or summarize first, just resume. When the work is fully done, run: kill $(cat /tmp/claude-overtime-caffeinate.pid) 2>/dev/null; rm -f /tmp/claude-overtime-caffeinate.pid /tmp/claude-overtime-timer.pid
+/loop <delay> Pick up exactly where we left off in this conversation. Continue whatever task or discussion was in progress — do not re-explain or summarize first, just resume. IMPORTANT SCOPE RULE: Only complete the unfinished task from this conversation. Do not start new work, push to remote, or make changes outside the project. When the work is fully done, clean up overtime mode: kill $(cat /tmp/claude-overtime-caffeinate.pid) 2>/dev/null; rm -f /tmp/claude-overtime-caffeinate.pid /tmp/claude-overtime-timer.pid /tmp/claude-overtime-permissions-owner; if [ -f .claude/settings.local.json ]; then node -e "const f='.claude/settings.local.json'; const s=JSON.parse(require('fs').readFileSync(f,'utf8')); delete s.permissions; if(Object.keys(s).length===0) require('fs').rmSync(f); else require('fs').writeFileSync(f,JSON.stringify(s,null,2)+'\n');" 2>/dev/null; fi
 ```
 
 Where `<delay>` is the parsed value expressed in a format the loop skill understands (e.g. `5h`, `90m`, `2h30m`).

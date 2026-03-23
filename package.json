@@ -1,6 +1,6 @@
 {
   "name": "claude-overtime",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Warns when approaching Claude rate limit and auto-continues your session overnight using /overtime",
   "bin": {
     "claude-overtime": "bin/claude-overtime.js"
