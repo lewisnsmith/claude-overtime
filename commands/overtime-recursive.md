@@ -1,6 +1,4 @@
-You are entering **overtime mode**. The user wants to pause and automatically resume the current conversation after a delay — **unattended**, with no one available to approve permission prompts.
-
-**Critical difference from a simple timer:** You must capture the current task context and spawn a manager agent that will actively continue the work after the delay. Do NOT just set a timer and hope — you are responsible for ensuring work continues.
+You are entering **recursive overtime mode**. This works like `/overtime` but with one key addition: if the manager agent hits another rate limit during work, it automatically re-enters overtime and keeps going until the task is done (up to 5 retries).
 
 If the user provided an argument: `$ARGUMENTS`
 
@@ -87,34 +85,40 @@ echo $! > /tmp/claude-overtime-caffeinate.pid
 
 Print a confirmation message like:
 
-> **Overtime mode activated — resuming in {delay_label}.**
+> **Recursive overtime mode activated — resuming in {delay_label}.**
 >
 > **Task context captured:**
 > {show the 3-5 bullet point summary or plan steps}
 >
-> Your machine will stay awake. A manager agent will pick up the work automatically. Go to sleep.
+> Your machine will stay awake. A manager agent will pick up the work automatically.
+> If another rate limit is hit, it will automatically wait and retry (up to 5 times).
+> Go to sleep.
 
 ---
 
-### Step 5: Wait for delay, then spawn the manager agent
+### Step 5: Wait for delay, then spawn the recursive manager agent
 
 Run the delay as a foreground wait so the session stays alive:
 
 ```bash
 DELAY_SECONDS=<computed>
-echo "Overtime: sleeping for $DELAY_SECONDS seconds..."
+echo "Overtime (recursive): sleeping for $DELAY_SECONDS seconds..."
 sleep $DELAY_SECONDS
-echo "Overtime: delay complete, spawning manager agent..."
+echo "Overtime (recursive): delay complete, spawning manager agent..."
 ```
 
 Then immediately spawn an **Agent** (using the Agent tool) with the following prompt. Replace `{TASK_CONTEXT}` with the captured context from Step 0:
 
 ```
-You are the **Overtime Manager Agent**. A previous session was paused due to
-rate limits. Your job is to continue and complete the unfinished work.
+You are the **Overtime Manager Agent (Recursive Mode)**. A previous session was
+paused due to rate limits. Your job is to continue and complete the unfinished
+work — and if you hit another rate limit, automatically wait and retry.
 
 ## Task Context
 {TASK_CONTEXT}
+
+## Retry Info
+Current attempt: 1 of 5
 
 ## Instructions
 
@@ -130,7 +134,25 @@ rate limits. Your job is to continue and complete the unfinished work.
 3. **Track progress**: Use TodoWrite to track which tasks are done as you work
    through them.
 
-4. **When all work is complete**, run cleanup:
+4. **Handle rate limits (RECURSIVE MODE)**: If you encounter a rate limit error
+   (HTTP 429, "rate limit", "exceeded your token limit", etc.) during work:
+
+   a. Note what task you were working on and what remains.
+   b. Parse the rate limit reset time. Run:
+      ```bash
+      echo "Rate limit hit. Parsing reset time..."
+      # Try to extract wait time from error, default to 5 hours
+      WAIT_SECONDS=18000
+      echo "Waiting $WAIT_SECONDS seconds for rate limit reset..."
+      sleep $WAIT_SECONDS
+      echo "Rate limit wait complete, resuming work..."
+      ```
+   c. After the wait, continue working on the remaining tasks from where you
+      left off. You still have the full task context.
+   d. Increment your retry count. If you have exceeded 5 retries, stop and
+      print a summary of what was completed and what remains.
+
+5. **When all work is complete**, run cleanup:
    ```bash
    # Kill caffeinate
    if [ -f /tmp/claude-overtime-caffeinate.pid ]; then
@@ -151,7 +173,8 @@ rate limits. Your job is to continue and complete the unfinished work.
    fi
    ```
 
-5. **Print a completion summary** listing what was done.
+6. **Print a completion summary** listing what was done and how many retries
+   were needed.
 
 ## SCOPE RULES
 - Only complete the tasks described above.
@@ -161,10 +184,10 @@ rate limits. Your job is to continue and complete the unfinished work.
 - If you are unsure about a task, skip it and note it in the summary.
 ```
 
-**Important:** The Agent tool call should use `description: "Overtime manager agent"` and pass the full prompt above (with `{TASK_CONTEXT}` replaced by the actual captured context).
+**Important:** The Agent tool call should use `description: "Recursive overtime manager agent"` and pass the full prompt above (with `{TASK_CONTEXT}` replaced by the actual captured context).
 
 ---
 
 ### That's it.
 
-Do NOT use `/loop` — it does not reliably continue work. The Agent-based approach above ensures focused, context-aware continuation.
+Do NOT use `/loop` — it does not reliably continue work. The Agent-based approach above ensures focused, context-aware continuation with automatic rate limit recovery.
