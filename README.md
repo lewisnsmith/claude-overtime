@@ -2,10 +2,11 @@
 
 Stop losing your late-night Claude sessions to rate limits.
 
-**claude-overtime** does two things:
+**claude-overtime** does three things:
 
 1. **Warns you at ~95% of your hourly token limit** — a desktop notification + terminal banner so you always see it coming.
-2. **`/overtime` command** — grants temporary unattended permissions, keeps your machine awake with `caffeinate`, and loops automatically to continue your session when the rate limit resets. No permission prompts to stall at 3am.
+2. **`/overtime` & `/overtime-recursive` commands** — captures your current task context, spawns a manager agent that waits for the rate limit to reset, then actively continues your work unattended. The recursive variant auto-retries on subsequent rate limits.
+3. **Rate limit tracker** — a status bar showing your current usage % right in the Claude Code CLI.
 
 ---
 
@@ -16,9 +17,10 @@ npm install -g claude-overtime
 ```
 
 `postinstall` automatically runs `claude-overtime install`, which:
-- Copies the `/overtime` slash command to `~/.claude/commands/overtime.md`
+- Copies `/overtime` and `/overtime-recursive` slash commands to `~/.claude/commands/`
 - Installs the rate-limit warning hook to `~/.claude/hooks/`
-- Registers the `Stop` hook in `~/.claude/settings.json`
+- Installs the status line script for usage % display
+- Registers the `Stop` hook and status line in `~/.claude/settings.json`
 
 Or install manually:
 
@@ -39,9 +41,10 @@ Run this in any Claude Code session when you're about to (or have just) hit your
 ```
 
 Defaults to resuming in **5 hours**. Claude will:
+- Capture your current task context (reads the active plan file, or summarizes the conversation)
 - Grant temporary project-scoped permissions (so it doesn't stall on approval prompts overnight)
 - Keep your machine awake
-- Pick up the conversation exactly where it left off — no summary, no plan file, just continuation
+- Spawn a **manager agent** that picks up and continues the work after the delay
 
 You can specify a custom delay:
 
@@ -51,7 +54,26 @@ You can specify a custom delay:
 /overtime 2h30m
 ```
 
-Supported formats: `Nh` (hours), `Nm` (minutes), `NhMm` (combined), plain number = minutes.
+Supported formats: `Nh` (hours), `Nm` (minutes), `NhMm` (combined), `Ns` (seconds, useful for testing), plain number = minutes.
+
+### `/overtime-recursive`
+
+Same as `/overtime`, but if the manager agent hits another rate limit during work, it automatically waits for the reset and retries — up to 5 times. Use this for long tasks that might span multiple rate limit windows.
+
+```
+/overtime-recursive
+/overtime-recursive 1h
+```
+
+### Rate limit tracker (status bar)
+
+After installation, your Claude Code status bar shows your current rate limit usage:
+
+```
+OT: 72% [==============      ]
+```
+
+This updates automatically after each assistant response. Uses Claude Code's built-in `rate_limits.five_hour.used_percentage` data when available, falling back to the token tracking hook.
 
 ### Rate limit warning
 
@@ -85,10 +107,21 @@ Add this to your `.zshrc` / `.bashrc` to persist it.
 | Component | What it does |
 |---|---|
 | `hooks/rate-limit-warn.sh` | Runs on every Claude `Stop` event, tracks cumulative token usage for the session, fires warning at threshold |
-| `commands/overtime.md` | The `/overtime` slash command — grants permissions, starts caffeinate, and loops |
+| `hooks/overtime-statusline.sh` | Status line script showing rate limit usage % in the CLI footer |
+| `commands/overtime.md` | The `/overtime` slash command — captures context, grants permissions, starts caffeinate, spawns manager agent |
+| `commands/overtime-recursive.md` | The `/overtime-recursive` slash command — like `/overtime` but auto-retries on subsequent rate limits |
 | `bin/claude-overtime.js` | CLI for install / uninstall / status |
 
 Token usage is accumulated in `~/.claude/overtime-token-state.json` and resets each new session.
+
+### The manager agent
+
+When `/overtime` fires, it doesn't just set a timer and hope. It:
+
+1. **Captures task context** — reads the active plan file (`~/.claude/plans/*.md`) or summarizes the current conversation into 3-5 bullet points
+2. **Spawns a manager agent** after the delay — a focused Agent subagent that receives the full task context and systematically works through the remaining tasks
+3. **The manager does the work** — reads files, edits code, runs tests, and spawns worker subagents for complex sub-tasks
+4. **Cleans up** when done — kills caffeinate, removes temporary permissions
 
 ### Unattended permissions
 
@@ -108,7 +141,7 @@ When you run `/overtime`, Claude writes a temporary `.claude/settings.local.json
 claude-overtime uninstall
 ```
 
-Removes the command, hook, and settings.json entry cleanly.
+Removes the commands, hooks, status line, and settings.json entries cleanly.
 
 ---
 
@@ -123,9 +156,10 @@ Removes the command, hook, and settings.json entry cleanly.
 ## The typical workflow
 
 1. It's 11pm. You're deep in a feature.
-2. You see the `⚠️ 95%` warning.
-3. You type `/overtime` (or `/overtime 1h` if you know your limit resets in an hour).
-4. Claude starts `caffeinate` and sets a timer.
-5. You go to sleep.
-6. Timer fires. Claude resumes right where the conversation left off.
-7. You wake up in the morning. The feature is done. `caffeinate` has been killed.
+2. You glance at the status bar: `OT: 87%` — getting close.
+3. You see the `⚠️ 95%` warning.
+4. You type `/overtime` (or `/overtime-recursive` for a big task).
+5. Claude captures your task context, starts `caffeinate`, and sets a timer.
+6. You go to sleep.
+7. Timer fires. The manager agent picks up and continues the work with full context.
+8. You wake up in the morning. The feature is done. `caffeinate` has been killed.

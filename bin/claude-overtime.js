@@ -22,8 +22,12 @@ const SETTINGS_PATH = path.join(CLAUDE_DIR, 'settings.json');
 
 const HOOK_SRC = path.join(__dirname, '..', 'hooks', 'rate-limit-warn.sh');
 const HOOK_DEST = path.join(CLAUDE_DIR, 'hooks', 'claude-overtime-rate-limit-warn.sh');
+const STATUSLINE_SRC = path.join(__dirname, '..', 'hooks', 'overtime-statusline.sh');
+const STATUSLINE_DEST = path.join(CLAUDE_DIR, 'hooks', 'claude-overtime-statusline.sh');
 const COMMAND_SRC = path.join(__dirname, '..', 'commands', 'overtime.md');
 const COMMAND_DEST = path.join(COMMANDS_DIR, 'overtime.md');
+const COMMAND_RECURSIVE_SRC = path.join(__dirname, '..', 'commands', 'overtime-recursive.md');
+const COMMAND_RECURSIVE_DEST = path.join(COMMANDS_DIR, 'overtime-recursive.md');
 
 function readSettings() {
   try {
@@ -44,10 +48,12 @@ function writeSettings(settings) {
 function install() {
   log('Installing claude-overtime...\n');
 
-  // 1. Copy /overtime slash command
+  // 1. Copy slash commands
   fs.mkdirSync(COMMANDS_DIR, { recursive: true });
   fs.copyFileSync(COMMAND_SRC, COMMAND_DEST);
-  log('  ✓ Installed /overtime command →', COMMAND_DEST);
+  log('  ✓ Installed /overtime command           →', COMMAND_DEST);
+  fs.copyFileSync(COMMAND_RECURSIVE_SRC, COMMAND_RECURSIVE_DEST);
+  log('  ✓ Installed /overtime-recursive command →', COMMAND_RECURSIVE_DEST);
 
   // 2. Copy hook script
   const hooksDir = path.join(CLAUDE_DIR, 'hooks');
@@ -78,15 +84,34 @@ function install() {
 
   if (!alreadyRegistered) {
     settings.hooks.Stop = [...(settings.hooks.Stop || []), hookEntry];
-    writeSettings(settings);
     log('  ✓ Registered Stop hook       →', SETTINGS_PATH);
   } else {
     log('  · Stop hook already registered in', SETTINGS_PATH);
   }
 
+  // 4. Install status line script and register it
+  fs.copyFileSync(STATUSLINE_SRC, STATUSLINE_DEST);
+  fs.chmodSync(STATUSLINE_DEST, 0o755);
+  log('  ✓ Installed status line script →', STATUSLINE_DEST);
+
+  if (!settings.statusLine) {
+    settings.statusLine = {
+      type: 'command',
+      command: STATUSLINE_DEST
+    };
+    log('  ✓ Registered status line       →', SETTINGS_PATH);
+  } else {
+    log('  · Status line already configured in', SETTINGS_PATH);
+  }
+
+  // Write all settings changes at once
+  writeSettings(settings);
+
   log('\nclaude-overtime installed successfully.');
   log('  • You will be warned when ~95% of your hourly token limit is used.');
+  log('  • Rate limit usage % shown in the status bar.');
   log('  • Run /overtime in any Claude Code session to activate overnight mode.');
+  log('  • Run /overtime-recursive for auto-retry on subsequent rate limits.');
   log('\nTo set a custom warning threshold (tokens):');
   log('  export CLAUDE_OVERTIME_WARN_AT=80000');
 }
@@ -94,10 +119,14 @@ function install() {
 function uninstall() {
   log('Uninstalling claude-overtime...\n');
 
-  // Remove command
+  // Remove commands
   if (fs.existsSync(COMMAND_DEST)) {
     fs.rmSync(COMMAND_DEST);
     log('  ✓ Removed /overtime command');
+  }
+  if (fs.existsSync(COMMAND_RECURSIVE_DEST)) {
+    fs.rmSync(COMMAND_RECURSIVE_DEST);
+    log('  ✓ Removed /overtime-recursive command');
   }
 
   // Remove hook script
@@ -106,7 +135,13 @@ function uninstall() {
     log('  ✓ Removed hook script');
   }
 
-  // Remove hook entry from settings.json
+  // Remove status line script
+  if (fs.existsSync(STATUSLINE_DEST)) {
+    fs.rmSync(STATUSLINE_DEST);
+    log('  ✓ Removed status line script');
+  }
+
+  // Remove hook entry and status line from settings.json
   if (fs.existsSync(SETTINGS_PATH)) {
     const settings = readSettings();
     if (settings.hooks && settings.hooks.Stop) {
@@ -115,9 +150,12 @@ function uninstall() {
       );
       if (settings.hooks.Stop.length === 0) delete settings.hooks.Stop;
       if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
-      writeSettings(settings);
-      log('  ✓ Removed hook from settings.json');
     }
+    if (settings.statusLine && JSON.stringify(settings.statusLine).includes('claude-overtime-statusline')) {
+      delete settings.statusLine;
+    }
+    writeSettings(settings);
+    log('  ✓ Removed hook and status line from settings.json');
   }
 
   // Clean up state files
@@ -130,14 +168,20 @@ function uninstall() {
 
 function status() {
   const commandInstalled = fs.existsSync(COMMAND_DEST);
+  const commandRecursiveInstalled = fs.existsSync(COMMAND_RECURSIVE_DEST);
   const hookInstalled = fs.existsSync(HOOK_DEST);
+  const statuslineInstalled = fs.existsSync(STATUSLINE_DEST);
   const settings = readSettings();
   const hookRegistered = JSON.stringify(settings.hooks || {}).includes('claude-overtime-rate-limit-warn');
+  const statuslineRegistered = !!(settings.statusLine && JSON.stringify(settings.statusLine).includes('claude-overtime-statusline'));
 
   console.log('claude-overtime status:');
-  console.log(' ', commandInstalled ? '✓' : '✗', '/overtime command:', commandInstalled ? COMMAND_DEST : 'not installed');
-  console.log(' ', hookInstalled    ? '✓' : '✗', 'Hook script:      ', hookInstalled    ? HOOK_DEST     : 'not installed');
-  console.log(' ', hookRegistered   ? '✓' : '✗', 'settings.json:    ', hookRegistered   ? 'hook registered' : 'not registered');
+  console.log(' ', commandInstalled          ? '✓' : '✗', '/overtime command:          ', commandInstalled          ? COMMAND_DEST          : 'not installed');
+  console.log(' ', commandRecursiveInstalled ? '✓' : '✗', '/overtime-recursive command:', commandRecursiveInstalled ? COMMAND_RECURSIVE_DEST : 'not installed');
+  console.log(' ', hookInstalled             ? '✓' : '✗', 'Hook script:                ', hookInstalled             ? HOOK_DEST              : 'not installed');
+  console.log(' ', statuslineInstalled       ? '✓' : '✗', 'Status line script:         ', statuslineInstalled       ? STATUSLINE_DEST        : 'not installed');
+  console.log(' ', hookRegistered            ? '✓' : '✗', 'settings.json:              ', hookRegistered            ? 'hook registered'       : 'not registered');
+  console.log(' ', statuslineRegistered      ? '✓' : '✗', 'settings.json:              ', statuslineRegistered      ? 'status line registered' : 'not registered');
 
   const stateFile = path.join(CLAUDE_DIR, 'overtime-token-state.json');
   if (fs.existsSync(stateFile)) {
