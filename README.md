@@ -40,8 +40,11 @@ Run this in any Claude Code session when you're about to (or have just) hit your
 
 Defaults to resuming in **5 hours**. Claude will:
 - Grant temporary project-scoped permissions (so it doesn't stall on approval prompts overnight)
+- Ask you to choose an abort-on-failure behavior (stop, warn-and-continue, or cleanup-and-exit)
+- Snapshot the current task as a drift anchor
+- Write session rules to `.claude/overtime-rules.md`
 - Keep your machine awake
-- Pick up the conversation exactly where it left off — no summary, no plan file, just continuation
+- Pick up the conversation exactly where it left off — following the session rules automatically
 
 You can specify a custom delay:
 
@@ -85,7 +88,7 @@ Add this to your `.zshrc` / `.bashrc` to persist it.
 | Component | What it does |
 |---|---|
 | `hooks/rate-limit-warn.sh` | Runs on every Claude `Stop` event, tracks cumulative token usage for the session, fires warning at threshold |
-| `commands/overtime.md` | The `/overtime` slash command — grants permissions, starts caffeinate, and loops |
+| `commands/overtime.md` | The `/overtime` slash command — grants permissions, writes session rules, starts caffeinate, and loops |
 | `bin/claude-overtime.js` | CLI for install / uninstall / status |
 
 Token usage is accumulated in `~/.claude/overtime-token-state.json` and resets each new session.
@@ -95,10 +98,30 @@ Token usage is accumulated in `~/.claude/overtime-token-state.json` and resets e
 When you run `/overtime`, Claude writes a temporary `.claude/settings.local.json` in the project with broad tool permissions (`Bash(*)`, `Edit`, `Write`, etc.) so the resumed session can work without prompts.
 
 **Safety rails:**
-- Destructive commands are still denied (`rm -rf /`, `git push --force`, `git reset --hard`, `git clean -f`)
-- Claude is scoped to only finish the in-progress task — no new work, no pushing to remote, no changes outside the project
+- Destructive commands are still denied (`rm -rf /`, `git reset --hard`, `git clean -f`)
+- **All git push commands are blocked** — unreviewed overnight code never reaches remote
+- Claude is scoped to only finish the in-progress task — no new work, no changes outside the project
 - Permissions are **automatically removed** when the task completes
 - If the file already existed, only the `permissions` key is removed on cleanup — your other settings are preserved
+
+### Session rules
+
+When you activate `/overtime`, Claude writes `.claude/overtime-rules.md` with 10 behavioral rules the resumed session must follow:
+
+| Rule | What it enforces |
+|---|---|
+| **Git checkpoint** | Commits all uncommitted work before writing any new code |
+| **Incremental commits** | Commits after each logical unit — never batches 3+ files |
+| **Final commit** | Clean commit when all work is done |
+| **Session log** | Appends structured entries to `.claude/overtime-log.md` (gitignored) after each module |
+| **Architecture consistency** | Reads existing files first, matches their patterns (async style, exports, error handling) |
+| **Structural integrity** | Every function handles null/empty/error cases — no dead code or placeholder TODOs |
+| **Dependency audit** | Verifies packages exist in the manifest before using them |
+| **Flight proxy** | Optional — routes HTTP through [Flight proxy](https://github.com/lewisnsmith/flight) when `FLIGHT_PROXY=true` |
+| **Context drift prevention** | Every 3 commits, re-checks the task snapshot to stay on-scope |
+| **Git push blocked** | All pushes denied — you review and push manually in the morning |
+
+The rules file also contains a **task snapshot** (2-3 sentence summary of what you were working on) that acts as the drift anchor, and your chosen **abort behavior** for handling checkpoint failures.
 
 ---
 
@@ -125,7 +148,9 @@ Removes the command, hook, and settings.json entry cleanly.
 1. It's 11pm. You're deep in a feature.
 2. You see the `⚠️ 95%` warning.
 3. You type `/overtime` (or `/overtime 1h` if you know your limit resets in an hour).
-4. Claude starts `caffeinate` and sets a timer.
-5. You go to sleep.
-6. Timer fires. Claude resumes right where the conversation left off.
-7. You wake up in the morning. The feature is done. `caffeinate` has been killed.
+4. Claude asks your abort preference, snapshots the task, and writes session rules.
+5. Claude starts `caffeinate` and sets a timer.
+6. You go to sleep.
+7. Timer fires. Claude reads `.claude/overtime-rules.md`, checkpoints git, and resumes.
+8. It commits incrementally, logs progress to `.claude/overtime-log.md`, and checks for scope drift every 3 commits.
+9. You wake up in the morning. The feature is done. `caffeinate` has been killed. You review the log and push when ready.

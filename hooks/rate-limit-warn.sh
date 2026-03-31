@@ -11,14 +11,6 @@ set -euo pipefail
 # Read the hook input JSON from stdin
 INPUT=$(cat)
 
-# Parse the stop_reason from the event payload
-STOP_REASON=$(echo "$INPUT" | node -e "
-  let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{
-    try { const o=JSON.parse(d); console.log(o.stop_reason||o.stopReason||''); }
-    catch(e){ console.log(''); }
-  });
-" 2>/dev/null || echo "")
-
 # Parse token usage if available
 TOKENS_USED=$(echo "$INPUT" | node -e "
   let d=''; process.stdin.on('data',c=>d+=c).on('end',()=>{
