@@ -5,7 +5,7 @@ Stop losing your late-night Claude sessions to rate limits.
 **claude-overtime** does three things:
 
 1. **Warns you at ~95% of your hourly token limit** — a desktop notification + terminal banner so you always see it coming.
-2. **`/overtime` & `/overtime-recursive` commands** — captures your current task context, spawns a manager agent that waits for the rate limit to reset, then actively continues your work unattended. The recursive variant auto-retries on subsequent rate limits.
+2. **`/overtime` command** — captures your current task context, spawns a manager agent that waits for the rate limit to reset, then actively continues your work unattended. Auto-retries on subsequent rate limits (up to 5×). Crash-safe: permissions are cleaned up automatically even if the session dies.
 3. **Rate limit tracker** — a status bar showing your current usage % right in the Claude Code CLI.
 
 ---
@@ -17,7 +17,7 @@ npm install -g claude-overtime
 ```
 
 `postinstall` automatically runs `claude-overtime install`, which:
-- Copies `/overtime` and `/overtime-recursive` slash commands to `~/.claude/commands/`
+- Copies the `/overtime` slash command to `~/.claude/commands/`
 - Installs the rate-limit warning hook to `~/.claude/hooks/`
 - Installs the status line script for usage % display
 - Registers the `Stop` hook and status line in `~/.claude/settings.json`
@@ -42,12 +42,13 @@ Run this in any Claude Code session when you're about to (or have just) hit your
 
 Defaults to resuming in **5 hours**. Claude will:
 - Capture your current task context (reads the active plan file, or summarizes the conversation)
-- Grant temporary project-scoped permissions (so it doesn't stall on approval prompts overnight)
 - Ask you to choose an abort-on-failure behavior (stop, warn-and-continue, or cleanup-and-exit)
 - Snapshot the current task as a drift anchor
 - Write session rules to `.claude/overtime-rules.md`
+- Grant temporary project-scoped permissions (so it doesn't stall on approval prompts overnight)
 - Keep your machine awake
-- Pick up the conversation exactly where it left off — following the session rules automatically
+- Spawn a manager agent that picks up exactly where you left off
+- **Auto-retry** if the agent hits another rate limit — up to 5 times
 
 You can specify a custom delay:
 
@@ -58,15 +59,6 @@ You can specify a custom delay:
 ```
 
 Supported formats: `Nh` (hours), `Nm` (minutes), `NhMm` (combined), `Ns` (seconds, useful for testing), plain number = minutes.
-
-### `/overtime-recursive`
-
-Same as `/overtime`, but if the manager agent hits another rate limit during work, it automatically waits for the reset and retries — up to 5 times. Use this for long tasks that might span multiple rate limit windows.
-
-```
-/overtime-recursive
-/overtime-recursive 1h
-```
 
 ### Rate limit tracker (status bar)
 
@@ -109,10 +101,9 @@ Add this to your `.zshrc` / `.bashrc` to persist it.
 
 | Component | What it does |
 |---|---|
-| `hooks/rate-limit-warn.sh` | Runs on every Claude `Stop` event, tracks cumulative token usage for the session, fires warning at threshold |
+| `hooks/rate-limit-warn.sh` | Runs on every Claude `Stop` event, tracks cumulative token usage for the session, fires warning at threshold, and auto-cleans stale overtime permissions |
 | `hooks/overtime-statusline.sh` | Status line script showing rate limit usage % in the CLI footer |
-| `commands/overtime.md` | The `/overtime` slash command — grants permissions, writes session rules, starts caffeinate, and loops |
-| `commands/overtime-recursive.md` | The `/overtime-recursive` slash command — like `/overtime` but auto-retries on subsequent rate limits |
+| `commands/overtime.md` | The `/overtime` slash command — captures context, writes session rules, grants permissions, sleeps, then spawns a manager agent with auto-retry |
 | `bin/claude-overtime.js` | CLI for install / uninstall / status |
 
 Token usage is accumulated in `~/.claude/overtime-token-state.json` and resets each new session.
@@ -136,6 +127,8 @@ When you run `/overtime`, Claude writes a temporary `.claude/settings.local.json
 - Claude is scoped to only finish the in-progress task — no new work, no changes outside the project
 - Permissions are **automatically removed** when the task completes
 - If the file already existed, only the `permissions` key is removed on cleanup — your other settings are preserved
+
+**Crash safety:** `/overtime` writes a state file to `/tmp/claude-overtime-state.json` containing the path to the settings file and an expiry timestamp (delay + 1 hour buffer). The `rate-limit-warn.sh` Stop hook checks this on every session stop. If the overtime session crashed without cleaning up, the next time you use Claude Code the stale permissions are detected and removed automatically.
 
 ### Session rules
 
@@ -181,7 +174,7 @@ Removes the commands, hooks, status line, and settings.json entries cleanly.
 1. It's 11pm. You're deep in a feature.
 2. You glance at the status bar: `OT: 87%` — getting close.
 3. You see the `⚠️ 95%` warning.
-4. You type `/overtime` (or `/overtime-recursive` for a long task, or `/overtime 1h` if you know your limit).
+4. You type `/overtime` (or `/overtime 1h` if you know your limit).
 5. Claude asks your abort preference, snapshots the task, and writes session rules.
 6. Claude starts `caffeinate` and sets a timer.
 7. You go to sleep.

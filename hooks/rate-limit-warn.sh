@@ -75,4 +75,38 @@ if [[ "$SESSION_TOTAL" -lt 1000 ]] && [[ -f "$WARN_FILE" ]]; then
   rm -f "$WARN_FILE"
 fi
 
+# Auto-cleanup stale overtime permissions
+# If /overtime was active and the session crashed, clean up on the next Stop event
+OT_STATE_FILE="/tmp/claude-overtime-state.json"
+if [[ -f "$OT_STATE_FILE" ]]; then
+  OT_EXPIRY=$(node -e "
+    try {
+      const s=JSON.parse(require('fs').readFileSync('$OT_STATE_FILE','utf8'));
+      console.log(s.expires_at||0);
+    } catch(e) { console.log(0); }
+  " 2>/dev/null || echo "0")
+  OT_NOW=$(date +%s)
+  if [[ "$OT_NOW" -gt "$OT_EXPIRY" ]]; then
+    OT_SETTINGS=$(node -e "
+      try {
+        const s=JSON.parse(require('fs').readFileSync('$OT_STATE_FILE','utf8'));
+        console.log(s.settings_path||'');
+      } catch(e) { console.log(''); }
+    " 2>/dev/null || echo "")
+    if [[ -n "$OT_SETTINGS" && -f "$OT_SETTINGS" ]]; then
+      node -e "
+        const f='$OT_SETTINGS';
+        try {
+          const s=JSON.parse(require('fs').readFileSync(f,'utf8'));
+          delete s.permissions;
+          if(Object.keys(s).length===0) require('fs').rmSync(f);
+          else require('fs').writeFileSync(f,JSON.stringify(s,null,2)+'\n');
+        } catch(e) {}
+      " 2>/dev/null
+    fi
+    rm -f "$OT_STATE_FILE" /tmp/claude-overtime-permissions-owner \
+          /tmp/claude-overtime-caffeinate.pid 2>/dev/null || true
+  fi
+fi
+
 exit 0

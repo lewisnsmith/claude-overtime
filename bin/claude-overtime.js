@@ -26,8 +26,6 @@ const STATUSLINE_SRC = path.join(__dirname, '..', 'hooks', 'overtime-statusline.
 const STATUSLINE_DEST = path.join(CLAUDE_DIR, 'hooks', 'claude-overtime-statusline.sh');
 const COMMAND_SRC = path.join(__dirname, '..', 'commands', 'overtime.md');
 const COMMAND_DEST = path.join(COMMANDS_DIR, 'overtime.md');
-const COMMAND_RECURSIVE_SRC = path.join(__dirname, '..', 'commands', 'overtime-recursive.md');
-const COMMAND_RECURSIVE_DEST = path.join(COMMANDS_DIR, 'overtime-recursive.md');
 
 function readSettings() {
   try {
@@ -51,9 +49,7 @@ function install() {
   // 1. Copy slash commands
   fs.mkdirSync(COMMANDS_DIR, { recursive: true });
   fs.copyFileSync(COMMAND_SRC, COMMAND_DEST);
-  log('  ✓ Installed /overtime command           →', COMMAND_DEST);
-  fs.copyFileSync(COMMAND_RECURSIVE_SRC, COMMAND_RECURSIVE_DEST);
-  log('  ✓ Installed /overtime-recursive command →', COMMAND_RECURSIVE_DEST);
+  log('  ✓ Installed /overtime command →', COMMAND_DEST);
 
   // 2. Copy hook script
   const hooksDir = path.join(CLAUDE_DIR, 'hooks');
@@ -111,7 +107,7 @@ function install() {
   log('  • You will be warned when ~95% of your hourly token limit is used.');
   log('  • Rate limit usage % shown in the status bar.');
   log('  • Run /overtime in any Claude Code session to activate overnight mode.');
-  log('  • Run /overtime-recursive for auto-retry on subsequent rate limits.');
+  log('  • /overtime auto-retries on subsequent rate limits (up to 5x).');
   log('\nTo set a custom warning threshold (tokens):');
   log('  export CLAUDE_OVERTIME_WARN_AT=80000');
 }
@@ -124,9 +120,11 @@ function uninstall() {
     fs.rmSync(COMMAND_DEST);
     log('  ✓ Removed /overtime command');
   }
-  if (fs.existsSync(COMMAND_RECURSIVE_DEST)) {
-    fs.rmSync(COMMAND_RECURSIVE_DEST);
-    log('  ✓ Removed /overtime-recursive command');
+  // Remove legacy /overtime-recursive if present from a prior install
+  const legacyRecursiveDest = path.join(COMMANDS_DIR, 'overtime-recursive.md');
+  if (fs.existsSync(legacyRecursiveDest)) {
+    fs.rmSync(legacyRecursiveDest);
+    log('  ✓ Removed legacy /overtime-recursive command');
   }
 
   // Remove hook script
@@ -168,7 +166,6 @@ function uninstall() {
 
 function status() {
   const commandInstalled = fs.existsSync(COMMAND_DEST);
-  const commandRecursiveInstalled = fs.existsSync(COMMAND_RECURSIVE_DEST);
   const hookInstalled = fs.existsSync(HOOK_DEST);
   const statuslineInstalled = fs.existsSync(STATUSLINE_DEST);
   const settings = readSettings();
@@ -176,12 +173,11 @@ function status() {
   const statuslineRegistered = !!(settings.statusLine && JSON.stringify(settings.statusLine).includes('claude-overtime-statusline'));
 
   console.log('claude-overtime status:');
-  console.log(' ', commandInstalled          ? '✓' : '✗', '/overtime command:          ', commandInstalled          ? COMMAND_DEST          : 'not installed');
-  console.log(' ', commandRecursiveInstalled ? '✓' : '✗', '/overtime-recursive command:', commandRecursiveInstalled ? COMMAND_RECURSIVE_DEST : 'not installed');
-  console.log(' ', hookInstalled             ? '✓' : '✗', 'Hook script:                ', hookInstalled             ? HOOK_DEST              : 'not installed');
-  console.log(' ', statuslineInstalled       ? '✓' : '✗', 'Status line script:         ', statuslineInstalled       ? STATUSLINE_DEST        : 'not installed');
-  console.log(' ', hookRegistered            ? '✓' : '✗', 'settings.json:              ', hookRegistered            ? 'hook registered'       : 'not registered');
-  console.log(' ', statuslineRegistered      ? '✓' : '✗', 'settings.json:              ', statuslineRegistered      ? 'status line registered' : 'not registered');
+  console.log(' ', commandInstalled    ? '✓' : '✗', '/overtime command:     ', commandInstalled    ? COMMAND_DEST    : 'not installed');
+  console.log(' ', hookInstalled       ? '✓' : '✗', 'Hook script:           ', hookInstalled       ? HOOK_DEST       : 'not installed');
+  console.log(' ', statuslineInstalled ? '✓' : '✗', 'Status line script:    ', statuslineInstalled ? STATUSLINE_DEST : 'not installed');
+  console.log(' ', hookRegistered      ? '✓' : '✗', 'settings.json:         ', hookRegistered      ? 'hook registered'        : 'not registered');
+  console.log(' ', statuslineRegistered ? '✓' : '✗', 'settings.json:         ', statuslineRegistered ? 'status line registered' : 'not registered');
 
   const stateFile = path.join(CLAUDE_DIR, 'overtime-token-state.json');
   if (fs.existsSync(stateFile)) {
