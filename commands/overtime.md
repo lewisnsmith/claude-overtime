@@ -1,5 +1,7 @@
 You are entering **overtime mode**. The user wants to pause and automatically resume the current conversation after a delay — **unattended**, with no one available to approve permission prompts.
 
+Everything before the sleep must be mechanical bash — no summarization, no questions, no AI reasoning. All token-consuming work happens after the delay when the rate limit has reset.
+
 ---
 
 ### 1. Parse the delay from `$ARGUMENTS`
@@ -18,136 +20,184 @@ You are entering **overtime mode**. The user wants to pause and automatically re
 
 ---
 
-### 2. Capture task context
+### 2. Start caffeinate
 
-Figure out what work needs to be continued. Use **one** of these approaches:
+Run the appropriate command for the platform. Detect with `uname`.
 
-**A) Plan file exists:** Glob for plan files at `~/.claude/plans/*.md`. If any exist, read the most recently modified one. Extract the incomplete/pending steps.
+**macOS:**
+```bash
+nohup caffeinate -d > /tmp/claude-overtime-caffeinate.log 2>&1 &
+echo $! > /tmp/claude-overtime-caffeinate.pid
+```
 
-**B) No plan file:** Write a concise task summary (3–5 bullet points) describing:
-- What the user was working on in this conversation
-- What steps remain to be done
-- Any important context (branch name, key files, test commands)
-
-Store this context — you will pass it to the manager agent in Step 8.
-
----
-
-### 3. Ask the user for abort-on-failure behavior
-
-The resumed session needs to know what to do if the initial git checkpoint fails. Ask the user which behavior they prefer:
-
-1. **Stop** — Log the error to `.claude/overtime-log.md` and halt. Do not write any code. Leave cleanup for the user.
-2. **Warn and continue** — Log the error but proceed with the work anyway. The user can review the git state later.
-3. **Clean up and exit** — Log the error, run the full overtime cleanup (kill caffeinate, remove permissions), and exit cleanly.
-
-Default to **Stop** if the user doesn't choose.
+**Linux:**
+```bash
+nohup systemd-inhibit --what=idle --who="claude-overtime" --why="Waiting for overtime delay" sleep infinity > /tmp/claude-overtime-caffeinate.log 2>&1 &
+echo $! > /tmp/claude-overtime-caffeinate.pid
+```
 
 ---
 
-### 4. Snapshot the current task
+### 3. Write the state file
 
-Write a 2-3 sentence summary of what the user is working on right now — the goal, the approach, and what remains. This is the "drift anchor" the resumed session will check against every 3 commits. Write it into the rules file in Step 5.
+Generate a branch name and write the state file so the agent can find everything after waking up. Use the Bash tool:
+
+```bash
+PLAN_FILE=$(ls -t ~/.claude/plans/*.md 2>/dev/null | head -1)
+PROJECT_ROOT="$(pwd)"
+BRANCH="overtime/$(date +%Y%m%d-%H%M%S)"
+DELAY_SECONDS=<computed from Step 1>
+EXPIRY_AT=$(( $(date +%s) + DELAY_SECONDS + 3600 ))
+
+node -e "
+  require('fs').writeFileSync('/tmp/claude-overtime-state.json', JSON.stringify({
+    plan_file: process.env.PLAN_FILE || null,
+    project_root: process.env.PROJECT_ROOT,
+    delay_seconds: parseInt(process.env.DELAY_SECONDS),
+    expires_at: parseInt(process.env.EXPIRY_AT),
+    branch: process.env.BRANCH,
+    owner: 'overtime'
+  }, null, 2) + '\n');
+" 2>/dev/null
+
+echo "overtime" > /tmp/claude-overtime-permissions-owner
+```
 
 ---
 
-### 5. Write the session rules file
+### 4. Print confirmation and sleep
 
-Write `.claude/overtime-rules.md` in the **current project root**. Also ensure `.claude/overtime-log.md` is added to the project's `.gitignore` (create the entry if it doesn't exist).
+Print exactly:
 
-The file content must be exactly:
+> **Overtime activated. Resuming in [DELAY_LABEL]. Go to sleep.**
+
+Then run a **foreground** sleep with a cleanup trap so permissions and state files are removed if the process is killed before the agent fires:
+
+```bash
+DELAY_SECONDS=<computed>
+
+_overtime_cleanup() {
+  if [ -f /tmp/claude-overtime-caffeinate.pid ]; then
+    kill "$(cat /tmp/claude-overtime-caffeinate.pid)" 2>/dev/null || true
+    rm -f /tmp/claude-overtime-caffeinate.pid
+  fi
+  rm -f /tmp/claude-overtime-state.json /tmp/claude-overtime-permissions-owner 2>/dev/null || true
+}
+trap _overtime_cleanup EXIT INT TERM HUP
+
+echo "Overtime: sleeping for $DELAY_SECONDS seconds..."
+sleep "$DELAY_SECONDS"
+echo "Overtime: delay complete, spawning manager agent..."
+trap - EXIT INT TERM HUP
+```
+
+---
+
+### 5. Spawn the manager agent
+
+Immediately after the sleep completes, invoke the **Agent tool** with the following prompt verbatim. The agent will read the state file to get everything it needs.
+
+---
+
+```
+You are the **Overtime Manager Agent**. A previous Claude Code session was paused
+due to rate limits. Your job is to set up the session and complete the work —
+then create a draft PR for the user to review in the morning.
+
+Read /tmp/claude-overtime-state.json first to get: plan_file, project_root, branch name.
+
+---
+
+## Step 1 — Read task context
+
+If plan_file is set and the file exists, read it in full to understand the pending work.
+
+If plan_file is null or missing, run:
+  git log --oneline -20
+  git status
+  git diff --stat HEAD
+
+Use that output to infer what was in progress. Produce a 2–3 sentence summary of: what the
+goal is, what approach is being used, and what remains to be done.
+
+---
+
+## Step 2 — Write session rules
+
+Write `.claude/overtime-rules.md` in the project root with this exact structure:
 
 ````markdown
 # Overtime Session Rules
 
-This file was generated by `/overtime`. The resumed session MUST read and follow these rules before doing any work.
-
 ## Task snapshot
 
-> <INSERT TASK SUMMARY FROM STEP 4>
+> <INSERT 2–3 SENTENCE SUMMARY FROM STEP 1>
 
-This is the scope anchor. Every 3 commits, re-read this and confirm work is still on-scope. If drift is detected, stop, log a note in `.claude/overtime-log.md`, and re-center. Do not introduce features, refactors, or improvements outside this scope — log them as follow-ups instead.
+This is the scope anchor. Every 3 commits, re-read this and confirm work is still on-scope.
+If drift is detected, stop, log a note in `.claude/overtime-log.md`, and re-center.
 
 ## Abort behavior
 
-On-failure mode: **<INSERT USER'S CHOICE FROM STEP 3>**
+On-failure mode: **Stop**
 
 ---
 
 ## Rules
 
 ### 1. Pre-session git checkpoint
-
 Before writing any file, run:
-
-```bash
-git add -A && git commit -m "chore(overtime): checkpoint before unattended session [$(date +%Y%m%d-%H%M%S)]"
-```
-
-If this fails for any reason other than "nothing to commit", follow the configured abort behavior above.
+  git add -A && git commit -m "chore(overtime): checkpoint before unattended session [$(date +%Y%m%d-%H%M%S)]"
+If this fails for any reason other than "nothing to commit", log the error to `.claude/overtime-log.md` and halt.
 
 ### 2. Per-module incremental commits
-
-After completing each logical unit of work (a single function, module, or file), commit before moving to the next. Commit message format: `feat(<module>): <one-line description>`. Never batch changes across 3+ files before committing.
+After completing each logical unit of work, commit before moving to the next.
+Format: `feat(<module>): <one-line description>`. Never batch changes across 3+ files before committing.
 
 ### 3. Final commit on completion
+When all work is done — before cleanup — make a final commit:
+  chore(overtime): session complete — see .claude/overtime-log.md
 
-When all work is done — **before** cleanup runs — make a final commit:
+### 4. Session log
+After completing each module, append to `.claude/overtime-log.md`:
+  ## [YYYY-MM-DD HH:MM] — <module name>
+  **What was done:** ...
+  **Files modified:** ...
+  **Patterns used:** ...
+  **Edge cases handled:** ...
+  **Known limitations / follow-up needed:** ...
 
-```
-chore(overtime): session complete — see .claude/overtime-log.md
-```
+### 5. Architecture consistency
+Before editing any existing file, read it in full first. Match existing patterns.
+Before creating a new file, grep the codebase for dominant patterns and match them.
 
-This must happen before overtime cleanup strips permissions and removes state files.
+### 6. Structural integrity
+Every function written must handle the null/empty/error case. No dead code, placeholder TODOs,
+or half-finished branches may be committed.
 
-### 4. Session model log
+### 7. Dependency audit
+Before writing code, verify all packages exist in package.json / requirements.txt / pyproject.toml.
+Never reference a package that hasn't been confirmed to exist.
 
-After completing each module, append a structured entry to `.claude/overtime-log.md`:
+### 8. Context drift prevention
+Every 3 commits, re-read the Task snapshot above and confirm work is still on-scope.
+Log any out-of-scope ideas as follow-ups in `.claude/overtime-log.md` — do not implement them.
 
-```markdown
-## [YYYY-MM-DD HH:MM] — <module name>
-**What was done:** ...
-**Files modified:** ...
-**Patterns used:** ...
-**Edge cases handled:** ...
-**Known limitations / follow-up needed:** ...
-**Dependencies added:** ...
-```
+### 9. Git push restriction
+Only push the overtime branch. Never push main or master.
 
-This is the human-readable record of what happened overnight. The user reads this in the morning to understand everything without reverse-engineering the code. This file is gitignored.
-
-### 5. Architecture consistency check
-
-Before editing any existing file, read its full contents first. Match the file's existing patterns (async style, export style, error handling style). Before creating a new file, grep the codebase for the dominant patterns and match them. No mixing of async/await with .then() chains, no mixing of export styles, no introducing new error-handling patterns.
-
-### 6. Structural integrity rules
-
-Every function written must explicitly handle the null/empty/error case — no bare catch blocks, no silent swallowing of errors, no happy-path-only logic. Each module must have a single clear responsibility. No dead code, placeholder TODOs, or half-finished branches may be committed.
-
-### 7. Dependency audit before writing code
-
-Before writing any code, audit available packages (via `package.json` for Node, `requirements.txt`/`pyproject.toml` for Python) and only use packages confirmed to exist. Never reference a package or API method that hasn't been verified. If a needed package is missing, install it and add it to the manifest before using it.
-
-### 8. Flight proxy integration (optional)
-
-If the env var `FLIGHT_PROXY=true` is set, prefix all outbound HTTP calls through `$FLIGHT_BASE_URL` to route them through the Flight proxy server for interception and hallucination detection. If `FLIGHT_PROXY` is not set, skip this silently.
-
-### 9. Context drift prevention
-
-Every 3 commits, re-read the **Task snapshot** at the top of this file and confirm the work is still on-scope. If drift is detected, stop, log a note in `.claude/overtime-log.md`, and re-center. Do not introduce features, refactors, or improvements outside the original task scope — log them as follow-ups instead.
-
-### 10. Git push is blocked
-
-`git push` is denied in the permissions. All commits stay local. The user will review and push manually after waking up.
+### 10. Rate limit — stop immediately
+If you hit a rate limit error (HTTP 429, "token limit exceeded"), stop work at once.
+Log what was completed and what remains in `.claude/overtime-log.md`.
+Proceed directly to the final commit, PR creation, and cleanup. Do not retry.
 ````
+
+Also ensure `.claude/overtime-log.md` is in the project's `.gitignore`.
 
 ---
 
-### 6. Grant unattended permissions
+## Step 3 — Grant permissions
 
-Write a temporary project-level settings file so the resumed session can execute freely without permission prompts. **This is critical** — without it, Claude will stall overnight waiting for approval.
-
-Create (or merge into) `.claude/settings.local.json` in the **current project root**:
+Create or merge into `.claude/settings.local.json` in the project root:
 
 ```json
 {
@@ -164,7 +214,8 @@ Create (or merge into) `.claude/settings.local.json` in the **current project ro
     ],
     "deny": [
       "Bash(rm -rf /)",
-      "Bash(git push*)",
+      "Bash(git push origin main*)",
+      "Bash(git push origin master*)",
       "Bash(git reset --hard*)",
       "Bash(git clean -f*)"
     ]
@@ -172,177 +223,122 @@ Create (or merge into) `.claude/settings.local.json` in the **current project ro
 }
 ```
 
-If the file already exists, merge the `permissions.allow` entries (don't overwrite other settings).
+If the file already exists, merge the `permissions` key — preserve any other keys.
 
-Then write the crash-safety state file so the Stop hook can clean up if this session crashes:
+Then update the state file with the settings path:
 
 ```bash
-PROJECT_ROOT="$(pwd)"
-EXPIRY_AT=$(( $(date +%s) + DELAY_SECONDS + 3600 ))
 node -e "
-  require('fs').writeFileSync('/tmp/claude-overtime-state.json', JSON.stringify({
-    settings_path: '$PROJECT_ROOT/.claude/settings.local.json',
-    expires_at: $EXPIRY_AT,
-    owner: 'overtime'
-  }, null, 2) + '\n');
+  const f='/tmp/claude-overtime-state.json';
+  const s=JSON.parse(require('fs').readFileSync(f,'utf8'));
+  s.settings_path='$(pwd)/.claude/settings.local.json';
+  require('fs').writeFileSync(f,JSON.stringify(s,null,2)+'\n');
 " 2>/dev/null
-echo "overtime" > /tmp/claude-overtime-permissions-owner
-```
-
-> **Scope constraint:** These permissions let the resumed session complete only the work already in progress in this conversation. Do NOT start new unrelated work, install global packages, push to remote, or make changes outside the project directory.
-
----
-
-### 7. Keep the machine awake
-
-Run the appropriate caffeinate command for the platform. Detect with `uname`.
-
-**macOS:**
-```bash
-nohup caffeinate -d > /tmp/claude-overtime-caffeinate.log 2>&1 &
-echo $! > /tmp/claude-overtime-caffeinate.pid
-```
-
-**Linux:**
-```bash
-nohup systemd-inhibit --what=idle --who="claude-overtime" --why="Waiting for overtime delay" sleep infinity > /tmp/claude-overtime-caffeinate.log 2>&1 &
-echo $! > /tmp/claude-overtime-caffeinate.pid
 ```
 
 ---
 
-### 8. Confirm to the user
-
-Print a brief confirmation, for example:
-
-> **Overtime mode activated — resuming in 5 hours.**
-> Task captured. Session rules written to `.claude/overtime-rules.md`. Abort mode: **stop**.
-> Auto-retry on rate limits: up to 5 times. Your machine will stay awake. Go to sleep.
-
-Keep it to 3–4 lines. Include the delay, abort mode, and a one-line task summary. Do not restate the full rules.
-
----
-
-### 9. Wait for the delay, then spawn the manager agent
-
-Run a **foreground** sleep (not background) with a cleanup trap so permissions are removed if the process is killed before the agent fires. Use the Bash tool:
+## Step 4 — Create the overtime branch
 
 ```bash
-PROJECT_ROOT="$(pwd)"
-DELAY_SECONDS=<computed>
-
-_overtime_cleanup() {
-  if [ -f /tmp/claude-overtime-caffeinate.pid ]; then
-    kill "$(cat /tmp/claude-overtime-caffeinate.pid)" 2>/dev/null || true
-    rm -f /tmp/claude-overtime-caffeinate.pid
-  fi
-  rm -f /tmp/claude-overtime-permissions-owner /tmp/claude-overtime-state.json
-  SETTINGS="$PROJECT_ROOT/.claude/settings.local.json"
-  if [ -f "$SETTINGS" ]; then
-    node -e "
-      const f='$SETTINGS';
-      try {
-        const s=JSON.parse(require('fs').readFileSync(f,'utf8'));
-        delete s.permissions;
-        if(Object.keys(s).length===0) require('fs').rmSync(f);
-        else require('fs').writeFileSync(f,JSON.stringify(s,null,2)+'\n');
-      } catch(e) {}
-    " 2>/dev/null
-  fi
-}
-trap _overtime_cleanup EXIT INT TERM HUP
-
-echo "Overtime: sleeping for $DELAY_SECONDS seconds..."
-sleep "$DELAY_SECONDS"
-echo "Overtime: delay complete, spawning manager agent..."
-trap - EXIT INT TERM HUP
+BRANCH=<value from state file>
+git checkout -b "$BRANCH"
 ```
-
-Immediately after the sleep completes, invoke the **Agent tool** with the following prompt. Replace `{TASK_CONTEXT}` with the captured context from Step 2, and `{ABORT_BEHAVIOR}` with the user's choice from Step 3:
 
 ---
 
+## Step 5 — Git checkpoint
+
+```bash
+git add -A && git commit -m "chore(overtime): checkpoint before unattended session [$(date +%Y%m%d-%H%M%S)]"
 ```
-You are the **Overtime Manager Agent**. A previous Claude Code session was paused due
-to rate limits. Your job is to continue and complete the unfinished work — and if you
-hit another rate limit during execution, automatically wait and retry.
 
-## Task Context
-{TASK_CONTEXT}
+If this fails for any reason other than "nothing to commit":
+- Log the error to `.claude/overtime-log.md`
+- Run the cleanup in Step 8
+- Exit
 
-## Session Rules
-Read `.claude/overtime-rules.md` FIRST and follow every rule before doing any work.
-Abort behavior on checkpoint failure: {ABORT_BEHAVIOR}
+---
 
-## Retry Info
-Current attempt: 1 of 5
+## Step 6 — Execute remaining work
 
-## Instructions
+Work through the incomplete tasks from the plan or your inferred summary.
 
-1. **Assess current state**: Run `git status` and `git diff --stat` to understand what
-   has already been done. Read `.claude/overtime-rules.md` in full.
+- Do coding work directly: read files, edit code, write new files, run tests.
+- For complex or independent sub-tasks, spawn worker Agent subagents to parallelize.
+- Run tests and fix failures before considering a task complete.
+- After each logical unit, commit (Rule 2) and append to `.claude/overtime-log.md` (Rule 4).
+- Every 3 commits, re-read the Task snapshot from `.claude/overtime-rules.md` and confirm scope.
+- If you hit a rate limit at any point, follow Rule 10: stop immediately and proceed to Step 7.
 
-2. **Git checkpoint**: Follow Rule 1 in the rules file — commit any uncommitted work
-   before writing a single line of new code. Apply the configured abort behavior if
-   this fails.
+---
 
-3. **Execute remaining work**: Work through the incomplete tasks systematically.
-   - Do coding work directly: read files, edit code, write new files, run tests.
-   - For complex or independent sub-tasks, spawn worker Agent subagents to parallelize.
-   - Run tests and fix failures before considering a task complete.
-   - After each logical unit, commit (Rule 2) and append to `.claude/overtime-log.md` (Rule 4).
+## Step 7 — Final commit, push, and draft PR
 
-4. **Handle rate limits (RECURSIVE MODE)**: If you encounter a rate limit error
-   (HTTP 429, "rate limit", "exceeded your token limit", etc.) during work:
+When work is complete (or stopped due to rate limit):
 
-   a. Note what task you were working on and what remains.
-   b. Determine the reset wait time from the error if available; otherwise default to 5 hours.
-   c. Run:
-      ```bash
-      WAIT_SECONDS=18000  # adjust if reset time is known
-      echo "Rate limit hit. Waiting $WAIT_SECONDS seconds for reset..."
-      sleep "$WAIT_SECONDS"
-      echo "Rate limit wait complete, resuming..."
-      ```
-   d. Continue working on remaining tasks from where you left off.
-   e. Increment your retry count. If retries exceed 5, stop and print a summary of
-      what was completed and what remains.
+```bash
+# Final commit (if there are staged changes)
+git add -A
+git commit -m "chore(overtime): session complete — see .claude/overtime-log.md" 2>/dev/null || true
 
-5. **Final commit**: When all work is done, make the final commit per Rule 3 in the
-   rules file before running cleanup.
+# Push the overtime branch
+BRANCH=<value from state file>
+git push -u origin "$BRANCH"
 
-6. **Cleanup** — run this when work is complete OR after exhausting retries:
-   ```bash
-   PROJECT_ROOT="$(pwd)"
-   if [ -f /tmp/claude-overtime-caffeinate.pid ]; then
-     kill "$(cat /tmp/claude-overtime-caffeinate.pid)" 2>/dev/null || true
-     rm -f /tmp/claude-overtime-caffeinate.pid
-   fi
-   rm -f /tmp/claude-overtime-permissions-owner /tmp/claude-overtime-state.json
-   SETTINGS="$PROJECT_ROOT/.claude/settings.local.json"
-   if [ -f "$SETTINGS" ]; then
-     node -e "
-       const f='$SETTINGS';
-       try {
-         const s=JSON.parse(require('fs').readFileSync(f,'utf8'));
-         delete s.permissions;
-         if(Object.keys(s).length===0) require('fs').rmSync(f);
-         else require('fs').writeFileSync(f,JSON.stringify(s,null,2)+'\n');
-       } catch(e) {}
-     " 2>/dev/null
-   fi
-   ```
+# Create draft PR
+SUMMARY=<one-line task summary from Step 1>
+gh pr create --draft \
+  --title "overtime: $SUMMARY" \
+  --body "$(cat .claude/overtime-log.md 2>/dev/null || echo 'Overtime session complete.')"
+```
 
-7. **Print a completion summary** listing what was done and how many retries were needed.
+Print the PR URL.
+
+---
+
+## Step 8 — Cleanup
+
+```bash
+PROJECT_ROOT=<value from state file>
+
+# Kill caffeinate
+if [ -f /tmp/claude-overtime-caffeinate.pid ]; then
+  kill "$(cat /tmp/claude-overtime-caffeinate.pid)" 2>/dev/null || true
+  rm -f /tmp/claude-overtime-caffeinate.pid
+fi
+
+# Remove state files
+rm -f /tmp/claude-overtime-state.json /tmp/claude-overtime-permissions-owner 2>/dev/null || true
+
+# Remove overtime permissions (preserve other settings)
+SETTINGS="$PROJECT_ROOT/.claude/settings.local.json"
+if [ -f "$SETTINGS" ]; then
+  node -e "
+    const f='$SETTINGS';
+    try {
+      const s=JSON.parse(require('fs').readFileSync(f,'utf8'));
+      delete s.permissions;
+      if(Object.keys(s).length===0) require('fs').rmSync(f);
+      else require('fs').writeFileSync(f,JSON.stringify(s,null,2)+'\n');
+    } catch(e) {}
+  " 2>/dev/null
+fi
+
+# Remove rules file
+rm -f "$PROJECT_ROOT/.claude/overtime-rules.md" 2>/dev/null || true
+```
+
+---
 
 ## SCOPE RULES
-- Only complete the tasks described above.
+- Only complete the tasks described in the plan or inferred from git history.
 - Do NOT start new unrelated work.
-- Do NOT push to remote or deploy (`git push` is denied in the permissions).
+- Do NOT push to main or master.
 - Do NOT make changes outside the project directory.
-- If unsure about a task, skip it and note it in the summary.
+- If unsure about a task, skip it and note it in the log.
 ```
 
 ---
 
-**Important:** Do NOT use `/loop` — it does not reliably continue work and provides no crash safety. The Agent-based approach above keeps the full task context and recovers automatically from rate limits.
+**Important:** Do NOT use `/loop` — it does not reliably continue work and provides no crash safety. The Agent-based approach above keeps full task context and handles cleanup correctly.
