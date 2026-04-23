@@ -45,7 +45,12 @@ echo "{\"session_total\": $SESSION_TOTAL, \"updated\": \"$(date -u +%Y-%m-%dT%H:
 
 # Claude Pro / API rate limits vary. Default threshold: warn at 90,000 tokens
 # (roughly 95% of a typical ~95k hourly limit). Override with CLAUDE_OVERTIME_WARN_AT env var.
-WARN_AT="${CLAUDE_OVERTIME_WARN_AT:-90000}"
+WARN_AT=$(node -e "
+  try {
+    const c=JSON.parse(require('fs').readFileSync(require('os').homedir()+'/.claude/overtime-config.json','utf8'));
+    console.log(c.warnAt||process.env.CLAUDE_OVERTIME_WARN_AT||90000);
+  } catch(e){ console.log(process.env.CLAUDE_OVERTIME_WARN_AT||90000); }
+" 2>/dev/null || echo "${CLAUDE_OVERTIME_WARN_AT:-90000}")
 
 if [[ "$SESSION_TOTAL" -ge "$WARN_AT" ]] && [[ ! -f "$WARN_FILE" ]]; then
   touch "$WARN_FILE"
