@@ -60,6 +60,37 @@ You can specify a custom delay:
 
 Supported formats: `Nh` (hours), `Nm` (minutes), `NhMm` (combined), `Ns` (seconds, useful for testing), plain number = minutes.
 
+### `/all-nighter`
+
+`/overtime` finishes **one task**. `/all-nighter` grinds down a **whole backlog** — an adaptive overnight build loop that runs audit → plan → parallel implementation (sub-agent teams, one per track, isolated git worktrees) → review → test → integrate → PR, cycle after cycle, until the work is done or it hits a rate limit.
+
+When it hits a rate limit mid-cycle, it checkpoints the exact cursor (phase + per-track status) to `/tmp/claude-all-nighter-state.json` and exits clean. Next invocation resumes mid-track — completed tracks are not re-run.
+
+```
+/all-nighter            # run until done or rate-limited (max 8 cycles)
+/all-nighter 3c         # cap at 3 cycles
+/all-nighter 2h         # soft deadline, exits at next checkpoint past 2h
+/all-nighter --resume   # force resume from state file
+/all-nighter --fresh    # ignore existing state, start over
+```
+
+**Which command to use:**
+
+| Situation | Command |
+|---|---|
+| "Finish the one task I was working on when the rate limit hit" | `/overtime` |
+| "Grind down a long backlog with review + tests + PRs overnight" | `/all-nighter` |
+| "Resume work after rate-limit reset" | either — both auto-continue |
+
+Inspect or reset state manually:
+
+```bash
+cat /tmp/claude-all-nighter-state.json       # see current cursor
+rm  /tmp/claude-all-nighter-state.json       # force a fresh run next time
+```
+
+Both commands write their own state file (`claude-overtime-state.json` vs `claude-all-nighter-state.json`) and coexist cleanly — the Stop-hook cleanup keys off the `owner` field and only releases shared caffeinate when both are gone.
+
 ### Rate limit tracker (status bar)
 
 After installation, your Claude Code status bar shows your current rate limit usage:

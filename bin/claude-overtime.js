@@ -26,6 +26,8 @@ const STATUSLINE_SRC = path.join(__dirname, '..', 'hooks', 'overtime-statusline.
 const STATUSLINE_DEST = path.join(CLAUDE_DIR, 'hooks', 'claude-overtime-statusline.sh');
 const COMMAND_SRC = path.join(__dirname, '..', 'commands', 'overtime.md');
 const COMMAND_DEST = path.join(COMMANDS_DIR, 'overtime.md');
+const ALLNIGHTER_SRC = path.join(__dirname, '..', 'commands', 'all-nighter.md');
+const ALLNIGHTER_DEST = path.join(COMMANDS_DIR, 'all-nighter.md');
 
 function readSettings() {
   try {
@@ -49,7 +51,9 @@ function install() {
   // 1. Copy slash commands
   fs.mkdirSync(COMMANDS_DIR, { recursive: true });
   fs.copyFileSync(COMMAND_SRC, COMMAND_DEST);
-  log('  ✓ Installed /overtime command →', COMMAND_DEST);
+  log('  ✓ Installed /overtime command    →', COMMAND_DEST);
+  fs.copyFileSync(ALLNIGHTER_SRC, ALLNIGHTER_DEST);
+  log('  ✓ Installed /all-nighter command →', ALLNIGHTER_DEST);
 
   // 2. Copy hook script
   const hooksDir = path.join(CLAUDE_DIR, 'hooks');
@@ -120,6 +124,10 @@ function uninstall() {
     fs.rmSync(COMMAND_DEST);
     log('  ✓ Removed /overtime command');
   }
+  if (fs.existsSync(ALLNIGHTER_DEST)) {
+    fs.rmSync(ALLNIGHTER_DEST);
+    log('  ✓ Removed /all-nighter command');
+  }
   // Remove legacy /overtime-recursive if present from a prior install
   const legacyRecursiveDest = path.join(COMMANDS_DIR, 'overtime-recursive.md');
   if (fs.existsSync(legacyRecursiveDest)) {
@@ -166,6 +174,7 @@ function uninstall() {
 
 function status() {
   const commandInstalled = fs.existsSync(COMMAND_DEST);
+  const allnighterInstalled = fs.existsSync(ALLNIGHTER_DEST);
   const hookInstalled = fs.existsSync(HOOK_DEST);
   const statuslineInstalled = fs.existsSync(STATUSLINE_DEST);
   const settings = readSettings();
@@ -174,6 +183,7 @@ function status() {
 
   console.log('claude-overtime status:');
   console.log(' ', commandInstalled    ? '✓' : '✗', '/overtime command:     ', commandInstalled    ? COMMAND_DEST    : 'not installed');
+  console.log(' ', allnighterInstalled ? '✓' : '✗', '/all-nighter command:  ', allnighterInstalled ? ALLNIGHTER_DEST : 'not installed');
   console.log(' ', hookInstalled       ? '✓' : '✗', 'Hook script:           ', hookInstalled       ? HOOK_DEST       : 'not installed');
   console.log(' ', statuslineInstalled ? '✓' : '✗', 'Status line script:    ', statuslineInstalled ? STATUSLINE_DEST : 'not installed');
   console.log(' ', hookRegistered      ? '✓' : '✗', 'settings.json:         ', hookRegistered      ? 'hook registered'        : 'not registered');
@@ -187,7 +197,7 @@ function status() {
     } catch (_) {}
   }
 
-  if (!commandInstalled || !hookInstalled || !hookRegistered) {
+  if (!commandInstalled || !allnighterInstalled || !hookInstalled || !hookRegistered) {
     console.log('\n  Run: claude-overtime install');
   }
 }

@@ -75,27 +75,33 @@ if [[ "$SESSION_TOTAL" -lt 1000 ]] && [[ -f "$WARN_FILE" ]]; then
   rm -f "$WARN_FILE"
 fi
 
-# Auto-cleanup stale overtime permissions
-# If /overtime was active and the session crashed, clean up on the next Stop event
-OT_STATE_FILE="/tmp/claude-overtime-state.json"
-if [[ -f "$OT_STATE_FILE" ]]; then
-  OT_EXPIRY=$(node -e "
+# Auto-cleanup stale overtime / all-nighter permissions
+# If /overtime or /all-nighter was active and the session crashed, clean up on
+# the next Stop event. Both commands use the same state-file shape (owner,
+# expires_at, settings_path) so we reuse the same logic keyed on the file path.
+cleanup_stale_state() {
+  local STATE_FILE="$1"
+  [[ -f "$STATE_FILE" ]] || return 0
+  local EXPIRY
+  EXPIRY=$(node -e "
     try {
-      const s=JSON.parse(require('fs').readFileSync('$OT_STATE_FILE','utf8'));
+      const s=JSON.parse(require('fs').readFileSync('$STATE_FILE','utf8'));
       console.log(s.expires_at||0);
     } catch(e) { console.log(0); }
   " 2>/dev/null || echo "0")
-  OT_NOW=$(date +%s)
-  if [[ "$OT_NOW" -gt "$OT_EXPIRY" ]]; then
-    OT_SETTINGS=$(node -e "
+  local NOW
+  NOW=$(date +%s)
+  if [[ "$NOW" -gt "$EXPIRY" ]]; then
+    local SETTINGS
+    SETTINGS=$(node -e "
       try {
-        const s=JSON.parse(require('fs').readFileSync('$OT_STATE_FILE','utf8'));
+        const s=JSON.parse(require('fs').readFileSync('$STATE_FILE','utf8'));
         console.log(s.settings_path||'');
       } catch(e) { console.log(''); }
     " 2>/dev/null || echo "")
-    if [[ -n "$OT_SETTINGS" && -f "$OT_SETTINGS" ]]; then
+    if [[ -n "$SETTINGS" && -f "$SETTINGS" ]]; then
       node -e "
-        const f='$OT_SETTINGS';
+        const f='$SETTINGS';
         try {
           const s=JSON.parse(require('fs').readFileSync(f,'utf8'));
           delete s.permissions;
@@ -104,9 +110,17 @@ if [[ -f "$OT_STATE_FILE" ]]; then
         } catch(e) {}
       " 2>/dev/null
     fi
-    rm -f "$OT_STATE_FILE" /tmp/claude-overtime-permissions-owner \
-          /tmp/claude-overtime-caffeinate.pid 2>/dev/null || true
+    rm -f "$STATE_FILE" 2>/dev/null || true
   fi
+}
+
+cleanup_stale_state "/tmp/claude-overtime-state.json"
+cleanup_stale_state "/tmp/claude-all-nighter-state.json"
+
+# Only release shared caffeinate + owner marker if BOTH state files are gone
+if [[ ! -f "/tmp/claude-overtime-state.json" && ! -f "/tmp/claude-all-nighter-state.json" ]]; then
+  rm -f /tmp/claude-overtime-permissions-owner \
+        /tmp/claude-overtime-caffeinate.pid 2>/dev/null || true
 fi
 
 exit 0
