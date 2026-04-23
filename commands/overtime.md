@@ -4,11 +4,42 @@ Everything before the sleep must be mechanical bash — no summarization, no que
 
 ---
 
+### 0. Read config
+
+Read and merge global and project overtime config. All subsequent steps use these values.
+
+```bash
+_OT_GLOBAL_CONFIG="$HOME/.claude/overtime-config.json"
+_OT_PROJECT_CONFIG="$(pwd)/.claude/overtime-config.json"
+
+_OT_CONFIG=$(node -e "
+  const fs=require('fs');
+  const D={defaultDelay:'5h',warnAt:90000,maxRetries:5,abortBehavior:'stop',
+            customRules:[],prTitlePrefix:'overtime: ',prBodyTemplate:'{{log}}',protectedBranches:[]};
+  function r(p){try{return JSON.parse(fs.readFileSync(p,'utf8'));}catch(e){return {};}}
+  const g=r(process.env._OT_GLOBAL_CONFIG||''), p=r(process.env._OT_PROJECT_CONFIG||'');
+  const m=Object.assign({},D,g,p);
+  m.customRules=[...(Array.isArray(g.customRules)?g.customRules:[]),...(Array.isArray(p.customRules)?p.customRules:[])];
+  m.protectedBranches=['main','master',...(Array.isArray(p.protectedBranches)?p.protectedBranches:[])];
+  console.log(JSON.stringify(m));
+" 2>/dev/null || echo '{}')
+
+_OT_DEFAULT_DELAY=$(node -e "try{console.log(JSON.parse(process.env._OT_CONFIG).defaultDelay||'5h')}catch(e){console.log('5h')}" 2>/dev/null || echo "5h")
+_OT_MAX_RETRIES=$(node -e "try{console.log(JSON.parse(process.env._OT_CONFIG).maxRetries||5)}catch(e){console.log(5)}" 2>/dev/null || echo "5")
+_OT_ABORT_BEHAVIOR=$(node -e "try{const b=JSON.parse(process.env._OT_CONFIG).abortBehavior||'stop';console.log(b.charAt(0).toUpperCase()+b.slice(1))}catch(e){console.log('Stop')}" 2>/dev/null || echo "Stop")
+_OT_PR_TITLE_PREFIX=$(node -e "try{console.log(JSON.parse(process.env._OT_CONFIG).prTitlePrefix||'overtime: ')}catch(e){console.log('overtime: ')}" 2>/dev/null || echo "overtime: ")
+_OT_PR_BODY_TEMPLATE=$(node -e "try{process.stdout.write(JSON.parse(process.env._OT_CONFIG).prBodyTemplate||'{{log}}')}catch(e){process.stdout.write('{{log}}')" 2>/dev/null || printf '{{log}}')
+_OT_CUSTOM_RULES=$(node -e "try{const c=JSON.parse(process.env._OT_CONFIG);const r=c.customRules||[];console.log(r.join('\n\n'))}catch(e){console.log('')}" 2>/dev/null || echo "")
+_OT_PROTECTED_BRANCHES=$(node -e "try{const c=JSON.parse(process.env._OT_CONFIG);const b=(c.protectedBranches||[]).filter(b=>b!=='main'&&b!=='master');console.log(b.join(' '))}catch(e){console.log('')}" 2>/dev/null || echo "")
+```
+
+---
+
 ### 1. Parse the delay from `$ARGUMENTS`
 
 `$ARGUMENTS` may be empty or contain a time value such as `1h`, `90m`, `2h30m`, `30`, etc.
 
-- If `$ARGUMENTS` is empty or not a valid time, default to **5 hours**.
+- If `$ARGUMENTS` is empty or not a valid time, default to **`$_OT_DEFAULT_DELAY`** (from config, initially 5 hours).
 - Parse the value:
   - Plain number (e.g. `30`) → minutes
   - `Nm` or `Nmin` → minutes
@@ -138,7 +169,7 @@ If drift is detected, stop, log a note in `.claude/overtime-log.md`, and re-cent
 
 ## Abort behavior
 
-On-failure mode: **Stop**
+On-failure mode: **$_OT_ABORT_BEHAVIOR**
 
 ---
 
@@ -189,6 +220,8 @@ Only push the overtime branch. Never push main or master.
 If you hit a rate limit error (HTTP 429, "token limit exceeded"), stop work at once.
 Log what was completed and what remains in `.claude/overtime-log.md`.
 Proceed directly to the final commit, PR creation, and cleanup. Do not retry.
+
+$([ -n "$_OT_CUSTOM_RULES" ] && printf '%s' "$_OT_CUSTOM_RULES")
 ````
 
 Also ensure `.claude/overtime-log.md` is in the project's `.gitignore`.
@@ -216,6 +249,7 @@ Create or merge into `.claude/settings.local.json` in the project root:
       "Bash(rm -rf /)",
       "Bash(git push origin main*)",
       "Bash(git push origin master*)",
+      $([ -n "$_OT_PROTECTED_BRANCHES" ] && for b in $_OT_PROTECTED_BRANCHES; do printf '      "Bash(git push origin %s*)",\n' "$b"; done)
       "Bash(git reset --hard*)",
       "Bash(git clean -f*)"
     ]
@@ -288,9 +322,15 @@ git push -u origin "$BRANCH"
 
 # Create draft PR
 SUMMARY=<one-line task summary from Step 1>
+_OT_LOG_CONTENT=$(cat .claude/overtime-log.md 2>/dev/null || echo 'Overtime session complete.')
+_OT_PR_BODY=$(node -e "
+  const t=process.env._OT_PR_BODY_TEMPLATE||'{{log}}';
+  const l=process.env._OT_LOG_CONTENT||'';
+  console.log(t.replace('{{log}}',l));
+" 2>/dev/null || echo "$_OT_LOG_CONTENT")
 gh pr create --draft \
-  --title "overtime: $SUMMARY" \
-  --body "$(cat .claude/overtime-log.md 2>/dev/null || echo 'Overtime session complete.')"
+  --title "${_OT_PR_TITLE_PREFIX}$SUMMARY" \
+  --body "$_OT_PR_BODY"
 ```
 
 Print the PR URL.
