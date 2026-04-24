@@ -91,6 +91,45 @@ rm  /tmp/claude-all-nighter-state.json       # force a fresh run next time
 
 Both commands write their own state file (`claude-overtime-state.json` vs `claude-all-nighter-state.json`) and coexist cleanly — the Stop-hook cleanup keys off the `owner` field and only releases shared caffeinate when both are gone.
 
+### Customization
+
+Overtime behavior is configurable globally or per-project via JSON config files.
+
+**Global config** (`~/.claude/overtime-config.json`) — applies to all projects:
+
+```bash
+claude-overtime config init                        # scaffold with defaults
+claude-overtime config get                         # show merged config
+claude-overtime config set defaultDelay 2h         # change default delay
+claude-overtime config set warnAt 80000            # token warning threshold
+claude-overtime config set maxRetries 3            # auto-retry limit
+claude-overtime config set abortBehavior continue  # "stop" or "continue"
+```
+
+**Project config** (`.claude/overtime-config.json` in project root) — overrides global:
+
+```bash
+claude-overtime config init --project    # scaffold project config
+claude-overtime config set --project defaultDelay 1h
+claude-overtime config set --project customRules "Never run migrations in unattended sessions."
+claude-overtime config set --project protectedBranches staging
+```
+
+**All configurable fields:**
+
+| Field | Default | Description |
+|---|---|---|
+| `defaultDelay` | `"5h"` | Default delay when `/overtime` is invoked with no argument |
+| `warnAt` | `90000` | Token count that triggers the rate-limit warning |
+| `maxRetries` | `5` | Auto-retry limit for subsequent rate limits |
+| `abortBehavior` | `"stop"` | On-failure mode: `"stop"` or `"continue"` |
+| `customRules` | `[]` | Extra session rules appended after the built-in 10 |
+| `prTitlePrefix` | `"overtime: "` | PR title prefix |
+| `prBodyTemplate` | `"{{log}}"` | PR body template (`{{log}}` = overtime-log.md contents) |
+| `protectedBranches` | `[]` | Branches (beyond main/master) that overtime cannot push to |
+
+Config arrays are append-only from the CLI — edit the JSON file directly to replace them entirely.
+
 ### Rate limit tracker (status bar)
 
 After installation, your Claude Code status bar shows your current rate limit usage:
