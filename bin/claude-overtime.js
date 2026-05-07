@@ -1,49 +1,96 @@
 #!/usr/bin/env node
+'use strict';
 /**
- * claude-overtime CLI
- * Usage:
- *   claude-overtime install          - install the /overtime command and rate limit hook
- *   claude-overtime uninstall        - remove everything
- *   claude-overtime status           - show current install state
- *   claude-overtime config init      - scaffold global config with defaults
- *   claude-overtime config get [key] - print merged config or a single key
- *   claude-overtime config set <key> <value> [--project] - update config
- *   claude-overtime config validate  - check config files for errors
+ * claude-overtime v2 CLI
+ *
+ * Subcommands:
+ *   install [--dry-run] [--force]
+ *   uninstall
+ *   status
+ *   config <init|get|set|validate> [args] [--project] [--force]
+ *   state <show|reset> [<session-id>|--all]
  */
 
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-const os = require('os');
+const os   = require('os');
+
+// ─── Lib imports ─────────────────────────────────────────────────────────────
+
+const config = require('../lib/config');
+const state  = require('../lib/state');
+
+// ─── Paths ───────────────────────────────────────────────────────────────────
+
+const HOME        = os.homedir();
+const CLAUDE_DIR  = path.join(HOME, '.claude');
+const HOOKS_DIR   = path.join(CLAUDE_DIR, 'hooks');
+const COMMANDS_DIR= path.join(CLAUDE_DIR, 'commands');
+const SETTINGS_PATH = path.join(CLAUDE_DIR, 'settings.json');
+const CACHE_PATH  = path.join(CLAUDE_DIR, 'overtime-statusline-cache.json');
+
+// Repo root hook / command sources
+const SRC_HOOKS   = path.join(__dirname, '..', 'hooks');
+const SRC_COMMANDS= path.join(__dirname, '..', 'commands');
+
+// Files installed by claude-overtime install
+const INSTALLED_FILES = [
+  {
+    src:  path.join(SRC_COMMANDS, 'overtime.md'),
+    dest: path.join(COMMANDS_DIR, 'overtime.md'),
+    mode: null,
+  },
+  {
+    src:  path.join(SRC_HOOKS, 'stop.sh'),
+    dest: path.join(HOOKS_DIR, 'claude-overtime-stop.sh'),
+    mode: 0o755,
+  },
+  {
+    src:  path.join(SRC_HOOKS, 'session-start.sh'),
+    dest: path.join(HOOKS_DIR, 'claude-overtime-session-start.sh'),
+    mode: 0o755,
+  },
+  {
+    src:  path.join(SRC_HOOKS, 'pre-tool-use.sh'),
+    dest: path.join(HOOKS_DIR, 'claude-overtime-pre-tool-use.sh'),
+    mode: 0o755,
+  },
+  {
+    src:  path.join(SRC_HOOKS, 'overtime-statusline.sh'),
+    dest: path.join(HOOKS_DIR, 'claude-overtime-statusline.sh'),
+    mode: 0o755,
+  },
+];
+
+// Hook registration specs for settings.json
+const HOOK_REGISTRATIONS = [
+  {
+    hookType: 'Stop',
+    command:  path.join(HOOKS_DIR, 'claude-overtime-stop.sh'),
+    matcher:  '',
+    tag:      'claude-overtime-stop',
+  },
+  {
+    hookType: 'SessionStart',
+    command:  path.join(HOOKS_DIR, 'claude-overtime-session-start.sh'),
+    matcher:  '',
+    tag:      'claude-overtime-session-start',
+  },
+  {
+    hookType: 'PreToolUse',
+    command:  path.join(HOOKS_DIR, 'claude-overtime-pre-tool-use.sh'),
+    matcher:  'Bash|Edit|Write',
+    tag:      'claude-overtime-pre-tool-use',
+  },
+];
+
+const STATUS_LINE_CMD = path.join(HOOKS_DIR, 'claude-overtime-statusline.sh');
+
+// ─── Utilities ───────────────────────────────────────────────────────────────
 
 const SILENT = process.argv.includes('--silent');
-const log = (...args) => { if (!SILENT) console.log(...args); };
-const err = (...args) => console.error(...args);
-
-const HOME = os.homedir();
-const CLAUDE_DIR = path.join(HOME, '.claude');
-const COMMANDS_DIR = path.join(CLAUDE_DIR, 'commands');
-const SETTINGS_PATH = path.join(CLAUDE_DIR, 'settings.json');
-
-const HOOK_SRC = path.join(__dirname, '..', 'hooks', 'rate-limit-warn.sh');
-const HOOK_DEST = path.join(CLAUDE_DIR, 'hooks', 'claude-overtime-rate-limit-warn.sh');
-const STATUSLINE_SRC = path.join(__dirname, '..', 'hooks', 'overtime-statusline.sh');
-const STATUSLINE_DEST = path.join(CLAUDE_DIR, 'hooks', 'claude-overtime-statusline.sh');
-const COMMAND_SRC = path.join(__dirname, '..', 'commands', 'overtime.md');
-const COMMAND_DEST = path.join(COMMANDS_DIR, 'overtime.md');
-const ALLNIGHTER_SRC = path.join(__dirname, '..', 'commands', 'all-nighter.md');
-const ALLNIGHTER_DEST = path.join(COMMANDS_DIR, 'all-nighter.md');
-
-const GLOBAL_CONFIG_PATH = path.join(CLAUDE_DIR, 'overtime-config.json');
-const CONFIG_DEFAULTS = {
-  defaultDelay: '5h',
-  warnAt: 90000,
-  maxRetries: 5,
-  abortBehavior: 'stop',
-  customRules: [],
-  prTitlePrefix: 'overtime: ',
-  prBodyTemplate: '{{log}}',
-  protectedBranches: [],
-};
+const log  = (...a) => { if (!SILENT) process.stdout.write(a.join(' ') + '\n'); };
+const warn = (...a) => process.stderr.write(a.join(' ') + '\n');
 
 function readSettings() {
   try {
@@ -51,7 +98,7 @@ function readSettings() {
       return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
     }
   } catch (e) {
-    err('Warning: could not parse', SETTINGS_PATH, '-', e.message);
+    warn('Warning: could not parse', SETTINGS_PATH, '-', e.message);
   }
   return {};
 }
@@ -61,367 +108,533 @@ function writeSettings(settings) {
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf8');
 }
 
-function readConfig(scope) {
-  const configPath = scope === 'global'
-    ? GLOBAL_CONFIG_PATH
-    : path.join(process.cwd(), '.claude', 'overtime-config.json');
-  try {
-    if (fs.existsSync(configPath)) {
-      return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+/**
+ * Read file content; return null if missing.
+ */
+function readFileSafe(p) {
+  try { return fs.readFileSync(p, 'utf8'); } catch (_) { return null; }
+}
+
+/**
+ * Compute a simple unified-style diff (--- a / +++ b) for two text blobs.
+ * Suitable for printing; not git-format.
+ */
+function simpleDiff(label, before, after) {
+  if (before === after) return null;
+  const lines = [];
+  lines.push(`--- a/${label}`);
+  lines.push(`+++ b/${label}`);
+
+  if (before === null) {
+    lines.push('@@ new file @@');
+    after.split('\n').forEach(l => lines.push('+' + l));
+  } else {
+    lines.push('@@ modified @@');
+    // Show full before/after for settings.json; for binary-ish show summary
+    before.split('\n').forEach(l => lines.push('-' + l));
+    after.split('\n').forEach(l  => lines.push('+' + l));
+  }
+  return lines.join('\n');
+}
+
+// ─── install / uninstall helpers ─────────────────────────────────────────────
+
+/**
+ * Build the target settings.json that install would write.
+ * Used for both dry-run (diff) and real install.
+ */
+function buildTargetSettings(settings) {
+  const next = JSON.parse(JSON.stringify(settings)); // deep clone
+
+  // Ensure hooks object
+  if (!next.hooks) next.hooks = {};
+
+  for (const reg of HOOK_REGISTRATIONS) {
+    if (!next.hooks[reg.hookType]) next.hooks[reg.hookType] = [];
+
+    const alreadyPresent = next.hooks[reg.hookType].some(entry =>
+      JSON.stringify(entry).includes(reg.tag)
+    );
+    if (!alreadyPresent) {
+      const entry = {
+        matcher: reg.matcher,
+        hooks: [{ type: 'command', command: reg.command }],
+        _tag: reg.tag,
+      };
+      next.hooks[reg.hookType] = [...next.hooks[reg.hookType], entry];
     }
-  } catch (e) {
-    err('Warning: could not parse', configPath, '-', e.message);
   }
-  return {};
+
+  // Status line
+  const statusAlreadySet =
+    next.statusLine && JSON.stringify(next.statusLine).includes('claude-overtime-statusline');
+  if (!statusAlreadySet) {
+    next.statusLine = { type: 'command', command: STATUS_LINE_CMD };
+  }
+
+  return next;
 }
 
-function writeConfig(scope, data) {
-  const configPath = scope === 'global'
-    ? GLOBAL_CONFIG_PATH
-    : path.join(process.cwd(), '.claude', 'overtime-config.json');
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(data, null, 2) + '\n', 'utf8');
+// ─── Subcommand: install ──────────────────────────────────────────────────────
+
+function cmdInstall(args) {
+  const dryRun = args.includes('--dry-run');
+  const force  = args.includes('--force');
+
+  if (dryRun) {
+    log('=== claude-overtime install --dry-run ===\n');
+  } else {
+    log('Installing claude-overtime...\n');
+  }
+
+  const diffs = [];
+  let hasChanges = false;
+
+  // ── File copies ──────────────────────────────────────────────────────────
+  for (const { src, dest } of INSTALLED_FILES) {
+    if (!fs.existsSync(src)) {
+      warn(`  ! Source not found: ${src} — skipping`);
+      continue;
+    }
+
+    const srcContent  = readFileSafe(src);
+    const destContent = readFileSafe(dest);
+
+    if (destContent !== null && destContent === srcContent) {
+      // Already up to date
+      if (dryRun) {
+        log(`  = (no change) ${dest}`);
+      } else {
+        log(`  · Already up to date: ${dest}`);
+      }
+      continue;
+    }
+
+    if (destContent !== null && destContent !== srcContent && !force) {
+      warn(`  ! ${dest} exists with different content. Use --force to overwrite. Skipping.`);
+      continue;
+    }
+
+    hasChanges = true;
+    const label = dest.replace(HOME, '~');
+
+    if (dryRun) {
+      const diff = simpleDiff(label, destContent, srcContent);
+      if (diff) diffs.push(diff);
+      log(`  + ${dest}`);
+    } else {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+      // Set mode for hook scripts
+      const spec = INSTALLED_FILES.find(f => f.dest === dest);
+      if (spec && spec.mode) fs.chmodSync(dest, spec.mode);
+      log(`  ✓ ${dest}`);
+    }
+  }
+
+  // ── settings.json ────────────────────────────────────────────────────────
+  const currentSettings = readSettings();
+  const targetSettings  = buildTargetSettings(currentSettings);
+  const currentJson = JSON.stringify(currentSettings, null, 2) + '\n';
+  const targetJson  = JSON.stringify(targetSettings, null, 2) + '\n';
+
+  if (currentJson !== targetJson) {
+    hasChanges = true;
+    if (dryRun) {
+      const diff = simpleDiff('~/.claude/settings.json', currentJson, targetJson);
+      if (diff) diffs.push(diff);
+      log(`  + ~/.claude/settings.json (hook registrations + status line)`);
+    } else {
+      writeSettings(targetSettings);
+      log('  ✓ Updated settings.json (hook registrations + status line)');
+    }
+  } else {
+    if (dryRun) {
+      log('  = (no change) ~/.claude/settings.json');
+    } else {
+      log('  · settings.json already up to date');
+    }
+  }
+
+  // ── Summary ──────────────────────────────────────────────────────────────
+  if (dryRun) {
+    if (diffs.length > 0) {
+      log('\n--- Diffs ---\n');
+      diffs.forEach(d => log(d + '\n'));
+    } else if (!hasChanges) {
+      log('\nNo changes would be made (already installed).');
+    }
+    log('\nDry run complete. Run without --dry-run to apply.');
+  } else {
+    if (!hasChanges) {
+      log('\nclaude-overtime already installed and up to date. (Re-run with --force to overwrite files.)');
+    } else {
+      log('\nclaude-overtime installed successfully.');
+      log('  Next steps:');
+      log('    1. claude-overtime config init     # scaffold global config');
+      log('    2. Restart Claude Code             # hooks take effect on next launch');
+      log('    3. /overtime --help                # inside Claude Code');
+    }
+  }
 }
 
-function mergeConfigs(global, project) {
-  const merged = Object.assign({}, CONFIG_DEFAULTS, global, project);
-  merged.customRules = [
-    ...(Array.isArray(global.customRules) ? global.customRules : []),
-    ...(Array.isArray(project.customRules) ? project.customRules : []),
-  ];
-  merged.protectedBranches = Array.isArray(project.protectedBranches)
-    ? project.protectedBranches
-    : [];
-  return merged;
+// ─── Subcommand: uninstall ────────────────────────────────────────────────────
+
+function cmdUninstall() {
+  // Refuse if active state files exist
+  const activeSessions = state.list();
+  if (activeSessions.length > 0) {
+    warn('claude-overtime: Refusing to uninstall — active sessions exist:');
+    for (const s of activeSessions) {
+      warn(`  session ${s._sessionId}  mode=${s.mode}  pid=${s.pid}  expires=${s.expires_at}`);
+    }
+    warn('  Run: claude-overtime state reset --all');
+    process.exit(1);
+  }
+
+  log('Uninstalling claude-overtime...\n');
+
+  // Remove installed files
+  for (const { dest } of INSTALLED_FILES) {
+    if (fs.existsSync(dest)) {
+      fs.rmSync(dest);
+      log(`  ✓ Removed ${dest}`);
+    }
+  }
+
+  // Remove hook registrations + status line from settings.json
+  if (fs.existsSync(SETTINGS_PATH)) {
+    const settings = readSettings();
+
+    for (const reg of HOOK_REGISTRATIONS) {
+      if (settings.hooks && settings.hooks[reg.hookType]) {
+        settings.hooks[reg.hookType] = settings.hooks[reg.hookType].filter(
+          entry => !JSON.stringify(entry).includes(reg.tag) &&
+                   !JSON.stringify(entry).includes(reg.command)
+        );
+        if (settings.hooks[reg.hookType].length === 0) {
+          delete settings.hooks[reg.hookType];
+        }
+      }
+    }
+    if (settings.hooks && Object.keys(settings.hooks).length === 0) {
+      delete settings.hooks;
+    }
+
+    if (settings.statusLine && JSON.stringify(settings.statusLine).includes('claude-overtime-statusline')) {
+      delete settings.statusLine;
+    }
+
+    writeSettings(settings);
+    log('  ✓ Removed hook registrations and status line from settings.json');
+  }
+
+  log('\nclaude-overtime uninstalled successfully.');
+  log('  Config files (~/.claude/overtime-config.json) are preserved.');
+  log('  To remove them: rm ~/.claude/overtime-config.json');
 }
 
-function validateConfig(obj) {
-  const errors = [];
-  if ('defaultDelay' in obj && typeof obj.defaultDelay !== 'string') {
-    errors.push('defaultDelay must be a string (e.g. "5h", "90m")');
+// ─── Subcommand: status ───────────────────────────────────────────────────────
+
+function cmdStatus() {
+  const pkg = require('../package.json');
+  log(`claude-overtime v${pkg.version}`);
+  log('');
+
+  // Installation state
+  const settings = readSettings();
+
+  const commandDest = path.join(COMMANDS_DIR, 'overtime.md');
+  const commandInstalled = fs.existsSync(commandDest);
+  log('Installation:');
+  log(`  ${commandInstalled ? '✓' : '✗'} /overtime command:          ${commandInstalled ? commandDest : 'not installed'}`);
+
+  for (const { dest } of INSTALLED_FILES.filter(f => f.mode)) {
+    const installed = fs.existsSync(dest);
+    const label = path.basename(dest).padEnd(38);
+    log(`  ${installed ? '✓' : '✗'} ${label} ${installed ? dest : 'not installed'}`);
   }
-  if ('warnAt' in obj && (typeof obj.warnAt !== 'number' || isNaN(obj.warnAt))) {
-    errors.push('warnAt must be a number');
+
+  // Hook registration checks
+  log('');
+  log('Hook registrations:');
+  for (const reg of HOOK_REGISTRATIONS) {
+    const registered = JSON.stringify(settings.hooks || {}).includes(reg.tag) ||
+                       JSON.stringify(settings.hooks || {}).includes(reg.command);
+    log(`  ${registered ? '✓' : '✗'} ${reg.hookType.padEnd(16)} ${registered ? 'registered' : 'not registered'}`);
   }
-  if ('maxRetries' in obj && (typeof obj.maxRetries !== 'number' || isNaN(obj.maxRetries))) {
-    errors.push('maxRetries must be a number');
+  const slRegistered = settings.statusLine &&
+    JSON.stringify(settings.statusLine).includes('claude-overtime-statusline');
+  log(`  ${slRegistered ? '✓' : '✗'} StatusLine         ${slRegistered ? 'registered' : 'not registered'}`);
+
+  // Active sessions
+  log('');
+  const sessions = state.list();
+  if (sessions.length === 0) {
+    log('Active sessions: none');
+  } else {
+    log(`Active sessions: ${sessions.length}`);
+    for (const s of sessions) {
+      log(`  session ${s._sessionId}`);
+      log(`    mode=${s.mode}  pid=${s.pid}  branch=${s.branch || 'n/a'}`);
+      log(`    started=${s.started_at}  expires=${s.expires_at}`);
+    }
   }
-  if ('abortBehavior' in obj && !['stop', 'continue'].includes(obj.abortBehavior)) {
-    errors.push('abortBehavior must be "stop" or "continue", got "' + obj.abortBehavior + '"');
+
+  // Rate-limit cache
+  log('');
+  const cacheContent = readFileSafe(CACHE_PATH);
+  if (cacheContent) {
+    try {
+      const cache = JSON.parse(cacheContent);
+      log(`Rate-limit cache (${CACHE_PATH}):`);
+      log(`  used: ${cache.percentUsed !== undefined ? cache.percentUsed + '%' : 'n/a'}`);
+      log(`  resets_at: ${cache.resetsAt || 'n/a'}`);
+      log(`  updated: ${cache.updatedAt || 'n/a'}`);
+    } catch (_) {
+      log('Rate-limit cache: (parse error)');
+    }
+  } else {
+    log('Rate-limit cache: not present');
   }
-  if ('customRules' in obj && !Array.isArray(obj.customRules)) {
-    errors.push('customRules must be an array of strings');
-  }
-  if ('prTitlePrefix' in obj && typeof obj.prTitlePrefix !== 'string') {
-    errors.push('prTitlePrefix must be a string');
-  }
-  if ('prBodyTemplate' in obj && typeof obj.prBodyTemplate !== 'string') {
-    errors.push('prBodyTemplate must be a string (use {{log}} as placeholder)');
-  }
-  if ('protectedBranches' in obj && !Array.isArray(obj.protectedBranches)) {
-    errors.push('protectedBranches must be an array of strings');
-  }
-  return errors;
 }
 
-function configCmd(args) {
+// ─── Subcommand: config ───────────────────────────────────────────────────────
+
+function cmdConfig(args) {
   const sub = args[0];
+  const isProject = args.includes('--project');
+  const force      = args.includes('--force');
+  const scope      = isProject ? 'project' : 'global';
 
   if (sub === 'init') {
-    const isProject = args.includes('--project');
-    const force = args.includes('--force');
-    const scope = isProject ? 'project' : 'global';
-    const configPath = scope === 'global'
-      ? GLOBAL_CONFIG_PATH
-      : path.join(process.cwd(), '.claude', 'overtime-config.json');
+    const configPath = isProject
+      ? config.PROJECT_CONFIG_PATH()
+      : config.GLOBAL_CONFIG_PATH;
 
     if (fs.existsSync(configPath) && !force) {
-      console.log('Config already exists:', configPath);
-      console.log('Use --force to overwrite with defaults.');
+      log('Config already exists:', configPath);
+      log('Use --force to overwrite with defaults.');
       return;
     }
-    writeConfig(scope, CONFIG_DEFAULTS);
-    console.log('Created', configPath);
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(config.CONFIG_DEFAULTS, null, 2) + '\n', 'utf8');
+    log('Created', configPath);
     return;
   }
 
   if (sub === 'get') {
-    const key = args[1];
-    const merged = mergeConfigs(readConfig('global'), readConfig('project'));
+    const key = args.filter(a => !a.startsWith('--'))[1];
+    const merged = config.loadMerged();
     if (key) {
       if (!(key in merged)) {
-        err('Unknown config key:', key);
+        warn('Unknown config key:', key);
+        warn('Valid keys:', Object.keys(config.CONFIG_DEFAULTS).join(', '));
         process.exit(1);
       }
-      console.log(JSON.stringify(merged[key], null, 2));
+      process.stdout.write(JSON.stringify(merged[key], null, 2) + '\n');
     } else {
-      console.log(JSON.stringify(merged, null, 2));
+      process.stdout.write(JSON.stringify(merged, null, 2) + '\n');
     }
     return;
   }
 
   if (sub === 'set') {
-    const isProject = args.includes('--project');
-    const scope = isProject ? 'project' : 'global';
-    const filteredArgs = args.filter(a => a !== '--project');
-    const key = filteredArgs[1];
-    const rawValue = filteredArgs[2];
+    // Filter out flags first
+    const positional = args.filter(a => !a.startsWith('--'));
+    // positional[0] = 'set', [1] = key, [2] = value
+    const key      = positional[1];
+    const rawValue = positional[2];
 
     if (!key || rawValue === undefined) {
-      err('Usage: claude-overtime config set <key> <value> [--project]');
-      process.exit(1);
-    }
-    if (!(key in CONFIG_DEFAULTS)) {
-      err('Unknown config key:', key);
-      err('Valid keys:', Object.keys(CONFIG_DEFAULTS).join(', '));
+      warn('Usage: claude-overtime config set <key> <value> [--project]');
       process.exit(1);
     }
 
-    const existing = readConfig(scope);
-    let coerced;
-    if (key === 'warnAt' || key === 'maxRetries') {
-      coerced = parseInt(rawValue, 10);
-      if (isNaN(coerced)) {
-        err('Error:', key, 'must be a number');
-        process.exit(1);
-      }
-    } else if (key === 'customRules' || key === 'protectedBranches') {
-      if (rawValue.startsWith('[')) {
-        try {
-          coerced = JSON.parse(rawValue);
-        } catch (e) {
-          err('Error: could not parse JSON array:', e.message);
-          process.exit(1);
-        }
-      } else {
-        // Append mode: add single string to existing array
-        const current = Array.isArray(existing[key]) ? existing[key] : [];
-        coerced = [...current, rawValue];
-      }
-    } else {
-      coerced = rawValue;
-    }
-
-    const updated = Object.assign({}, existing, { [key]: coerced });
-    const errors = validateConfig(updated);
-    if (errors.length > 0) {
-      errors.forEach(e => err('Error:', e));
+    try {
+      config.set(scope, key, rawValue);
+      log(`Set ${key} = ${JSON.stringify(rawValue)} in ${scope} config`);
+    } catch (e) {
+      warn('Error:', e.message);
       process.exit(1);
     }
-    writeConfig(scope, updated);
-    console.log('Set', key, '=', JSON.stringify(coerced), 'in', scope, 'config');
     return;
   }
 
   if (sub === 'validate') {
-    const globalCfg = readConfig('global');
-    const projectCfg = readConfig('project');
-    const allErrors = [];
-    const ge = validateConfig(globalCfg);
-    const pe = validateConfig(projectCfg);
-    ge.forEach(e => allErrors.push('Global: ' + e));
-    pe.forEach(e => allErrors.push('Project: ' + e));
-    if (allErrors.length === 0) {
-      console.log('Configs valid.');
+    // Validate both layers individually + merged
+    const { loadMerged, validate } = config;
+    let anyErrors = false;
+
+    const globalPath  = config.GLOBAL_CONFIG_PATH;
+    const projectPath = config.PROJECT_CONFIG_PATH();
+
+    for (const [label, p] of [['global', globalPath], ['project', projectPath]]) {
+      if (!fs.existsSync(p)) continue;
+      let obj;
+      try {
+        obj = JSON.parse(fs.readFileSync(p, 'utf8'));
+      } catch (e) {
+        warn(`${label}: JSON parse error: ${e.message}`);
+        anyErrors = true;
+        continue;
+      }
+      const errs = validate(obj);
+      if (errs.length > 0) {
+        errs.forEach(e => warn(`${label}: ${e}`));
+        anyErrors = true;
+      }
+    }
+
+    const mergedErrs = validate(loadMerged());
+    if (mergedErrs.length > 0) {
+      mergedErrs.forEach(e => warn(`merged: ${e}`));
+      anyErrors = true;
+    }
+
+    if (!anyErrors) {
+      log('Config valid.');
     } else {
-      allErrors.forEach(e => err(e));
       process.exit(1);
     }
     return;
   }
 
-  err('Usage: claude-overtime config <init|get|set|validate>');
+  warn('Usage: claude-overtime config <init|get|set|validate> [--project] [--force]');
   process.exit(1);
 }
 
-function install() {
-  log('Installing claude-overtime...\n');
+// ─── Subcommand: state ────────────────────────────────────────────────────────
 
-  // 1. Copy slash commands
-  fs.mkdirSync(COMMANDS_DIR, { recursive: true });
-  fs.copyFileSync(COMMAND_SRC, COMMAND_DEST);
-  log('  ✓ Installed /overtime command    →', COMMAND_DEST);
-  fs.copyFileSync(ALLNIGHTER_SRC, ALLNIGHTER_DEST);
-  log('  ✓ Installed /all-nighter command →', ALLNIGHTER_DEST);
+function cmdState(args) {
+  const sub = args[0];
 
-  // 2. Copy hook script
-  const hooksDir = path.join(CLAUDE_DIR, 'hooks');
-  fs.mkdirSync(hooksDir, { recursive: true });
-  fs.copyFileSync(HOOK_SRC, HOOK_DEST);
-  fs.chmodSync(HOOK_DEST, 0o755);
-  log('  ✓ Installed rate-limit hook  →', HOOK_DEST);
+  if (sub === 'show') {
+    const sessions = state.list();
+    if (sessions.length === 0) {
+      log('No active overtime sessions.');
+      return;
+    }
+    log(`${sessions.length} session(s):\n`);
+    for (const s of sessions) {
+      log(`Session: ${s._sessionId}`);
+      log(`  mode:        ${s.mode}`);
+      log(`  owner:       ${s.owner}`);
+      log(`  pid:         ${s.pid}`);
+      log(`  branch:      ${s.branch || 'n/a'}`);
+      log(`  started_at:  ${s.started_at}`);
+      log(`  expires_at:  ${s.expires_at}`);
+      log(`  retryCount:  ${s.retryCount}`);
+      log(`  projectRoot: ${s.projectRoot}`);
+      log('');
+    }
+    return;
+  }
 
-  // 3. Register the Stop hook in settings.json
-  const settings = readSettings();
-  if (!settings.hooks) settings.hooks = {};
-  if (!settings.hooks.Stop) settings.hooks.Stop = [];
+  if (sub === 'reset') {
+    const all       = args.includes('--all');
+    const sessionId = args.filter(a => !a.startsWith('--'))[1]; // positional after 'reset'
 
-  const hookEntry = {
-    matcher: '',
-    hooks: [
-      {
-        type: 'command',
-        command: HOOK_DEST
+    if (all) {
+      // GC stale, then remove everything remaining
+      const { removed: gcRemoved } = state.gcStale();
+      if (gcRemoved.length > 0) {
+        log(`GC removed ${gcRemoved.length} stale session(s): ${gcRemoved.join(', ')}`);
       }
-    ]
-  };
-
-  // Avoid duplicate entries
-  const alreadyRegistered = (settings.hooks.Stop || []).some(
-    h => JSON.stringify(h).includes('claude-overtime-rate-limit-warn')
-  );
-
-  if (!alreadyRegistered) {
-    settings.hooks.Stop = [...(settings.hooks.Stop || []), hookEntry];
-    log('  ✓ Registered Stop hook       →', SETTINGS_PATH);
-  } else {
-    log('  · Stop hook already registered in', SETTINGS_PATH);
-  }
-
-  // 4. Install status line script and register it
-  fs.copyFileSync(STATUSLINE_SRC, STATUSLINE_DEST);
-  fs.chmodSync(STATUSLINE_DEST, 0o755);
-  log('  ✓ Installed status line script →', STATUSLINE_DEST);
-
-  if (!settings.statusLine) {
-    settings.statusLine = {
-      type: 'command',
-      command: STATUSLINE_DEST
-    };
-    log('  ✓ Registered status line       →', SETTINGS_PATH);
-  } else {
-    log('  · Status line already configured in', SETTINGS_PATH);
-  }
-
-  // Write all settings changes at once
-  writeSettings(settings);
-
-  log('\nclaude-overtime installed successfully.');
-  log('  • You will be warned when ~95% of your hourly token limit is used.');
-  log('  • Rate limit usage % shown in the status bar.');
-  log('  • Run /overtime in any Claude Code session to activate overnight mode.');
-  log('  • /overtime auto-retries on subsequent rate limits (up to 5x).');
-
-  if (!fs.existsSync(GLOBAL_CONFIG_PATH)) {
-    log('\n  · No global config found. Run:');
-    log('      claude-overtime config init');
-    log('    to scaffold ~/.claude/overtime-config.json with defaults.');
-  }
-}
-
-function uninstall() {
-  log('Uninstalling claude-overtime...\n');
-
-  // Remove commands
-  if (fs.existsSync(COMMAND_DEST)) {
-    fs.rmSync(COMMAND_DEST);
-    log('  ✓ Removed /overtime command');
-  }
-  if (fs.existsSync(ALLNIGHTER_DEST)) {
-    fs.rmSync(ALLNIGHTER_DEST);
-    log('  ✓ Removed /all-nighter command');
-  }
-  // Remove legacy /overtime-recursive if present from a prior install
-  const legacyRecursiveDest = path.join(COMMANDS_DIR, 'overtime-recursive.md');
-  if (fs.existsSync(legacyRecursiveDest)) {
-    fs.rmSync(legacyRecursiveDest);
-    log('  ✓ Removed legacy /overtime-recursive command');
-  }
-
-  // Remove hook script
-  if (fs.existsSync(HOOK_DEST)) {
-    fs.rmSync(HOOK_DEST);
-    log('  ✓ Removed hook script');
-  }
-
-  // Remove status line script
-  if (fs.existsSync(STATUSLINE_DEST)) {
-    fs.rmSync(STATUSLINE_DEST);
-    log('  ✓ Removed status line script');
-  }
-
-  // Remove hook entry and status line from settings.json
-  if (fs.existsSync(SETTINGS_PATH)) {
-    const settings = readSettings();
-    if (settings.hooks && settings.hooks.Stop) {
-      settings.hooks.Stop = settings.hooks.Stop.filter(
-        h => !JSON.stringify(h).includes('claude-overtime-rate-limit-warn')
-      );
-      if (settings.hooks.Stop.length === 0) delete settings.hooks.Stop;
-      if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+      // Remove any still-active sessions forcibly
+      const remaining = state.list();
+      if (remaining.length === 0 && gcRemoved.length === 0) {
+        log('No sessions to reset.');
+        return;
+      }
+      for (const s of remaining) {
+        // Restore settings backup before deleting
+        if (s.settingsBackup !== undefined) {
+          const settingsLocalPath = path.join(s.projectRoot || process.cwd(), '.claude', 'settings.local.json');
+          try {
+            if (s.settingsBackup !== null) {
+              fs.mkdirSync(path.dirname(settingsLocalPath), { recursive: true });
+              fs.writeFileSync(settingsLocalPath, JSON.stringify(s.settingsBackup, null, 2), 'utf8');
+            } else {
+              try { fs.unlinkSync(settingsLocalPath); } catch (_) {}
+            }
+          } catch (e) {
+            warn(`Warning: could not restore settings for session ${s._sessionId}: ${e.message}`);
+          }
+        }
+        state.remove(s._sessionId);
+        log(`Removed session: ${s._sessionId}`);
+      }
+      log('All sessions reset.');
+      return;
     }
-    if (settings.statusLine && JSON.stringify(settings.statusLine).includes('claude-overtime-statusline')) {
-      delete settings.statusLine;
+
+    if (sessionId) {
+      const s = state.read(sessionId);
+      if (!s) {
+        warn(`Session not found: ${sessionId}`);
+        process.exit(1);
+      }
+      // Restore settings backup
+      if (s.settingsBackup !== undefined) {
+        const settingsLocalPath = path.join(s.projectRoot || process.cwd(), '.claude', 'settings.local.json');
+        try {
+          if (s.settingsBackup !== null) {
+            fs.mkdirSync(path.dirname(settingsLocalPath), { recursive: true });
+            fs.writeFileSync(settingsLocalPath, JSON.stringify(s.settingsBackup, null, 2), 'utf8');
+            log(`Restored settings.local.json for session ${sessionId}`);
+          } else {
+            try { fs.unlinkSync(settingsLocalPath); } catch (_) {}
+          }
+        } catch (e) {
+          warn(`Warning: could not restore settings: ${e.message}`);
+        }
+      }
+      state.remove(sessionId);
+      log(`Removed session: ${sessionId}`);
+      return;
     }
-    writeSettings(settings);
-    log('  ✓ Removed hook and status line from settings.json');
+
+    warn('Usage: claude-overtime state reset [<session-id>|--all]');
+    process.exit(1);
   }
 
-  // Clean up state files
-  const stateFile = path.join(CLAUDE_DIR, 'overtime-token-state.json');
-  if (fs.existsSync(stateFile)) fs.rmSync(stateFile);
-  try { fs.rmSync('/tmp/claude-overtime-warned'); } catch (_) {}
-
-  log('\nclaude-overtime uninstalled.');
+  warn('Usage: claude-overtime state <show|reset> [<session-id>|--all]');
+  process.exit(1);
 }
 
-function status() {
-  const commandInstalled = fs.existsSync(COMMAND_DEST);
-  const allnighterInstalled = fs.existsSync(ALLNIGHTER_DEST);
-  const hookInstalled = fs.existsSync(HOOK_DEST);
-  const statuslineInstalled = fs.existsSync(STATUSLINE_DEST);
-  const settings = readSettings();
-  const hookRegistered = JSON.stringify(settings.hooks || {}).includes('claude-overtime-rate-limit-warn');
-  const statuslineRegistered = !!(settings.statusLine && JSON.stringify(settings.statusLine).includes('claude-overtime-statusline'));
-
-  console.log('claude-overtime status:');
-  console.log(' ', commandInstalled    ? '✓' : '✗', '/overtime command:     ', commandInstalled    ? COMMAND_DEST    : 'not installed');
-  console.log(' ', allnighterInstalled ? '✓' : '✗', '/all-nighter command:  ', allnighterInstalled ? ALLNIGHTER_DEST : 'not installed');
-  console.log(' ', hookInstalled       ? '✓' : '✗', 'Hook script:           ', hookInstalled       ? HOOK_DEST       : 'not installed');
-  console.log(' ', statuslineInstalled ? '✓' : '✗', 'Status line script:    ', statuslineInstalled ? STATUSLINE_DEST : 'not installed');
-  console.log(' ', hookRegistered      ? '✓' : '✗', 'settings.json:         ', hookRegistered      ? 'hook registered'        : 'not registered');
-  console.log(' ', statuslineRegistered ? '✓' : '✗', 'settings.json:         ', statuslineRegistered ? 'status line registered' : 'not registered');
-
-  const stateFile = path.join(CLAUDE_DIR, 'overtime-token-state.json');
-  if (fs.existsSync(stateFile)) {
-    try {
-      const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-      console.log('\n  Session tokens tracked:', state.session_total, '(updated', state.updated + ')');
-    } catch (_) {}
-  }
-
-  if (!commandInstalled || !allnighterInstalled || !hookInstalled || !hookRegistered) {
-    console.log('\n  Run: claude-overtime install');
-  }
-
-  const globalCfg = readConfig('global');
-  const projectCfg = readConfig('project');
-  const merged = mergeConfigs(globalCfg, projectCfg);
-  const globalExists = fs.existsSync(GLOBAL_CONFIG_PATH);
-  const projectConfigPath = path.join(process.cwd(), '.claude', 'overtime-config.json');
-  const projectExists = fs.existsSync(projectConfigPath);
-
-  console.log('\nConfig (merged):');
-  console.log('  defaultDelay:       ', merged.defaultDelay);
-  console.log('  warnAt:             ', merged.warnAt);
-  console.log('  maxRetries:         ', merged.maxRetries);
-  console.log('  abortBehavior:      ', merged.abortBehavior);
-  console.log('  customRules:        ', merged.customRules.length > 0 ? merged.customRules.length + ' rule(s)' : '(none)');
-  console.log('  prTitlePrefix:      ', JSON.stringify(merged.prTitlePrefix));
-  console.log('  protectedBranches:  ', merged.protectedBranches.length > 0 ? merged.protectedBranches.join(', ') : '(none)');
-  console.log('  Global config:      ', globalExists ? GLOBAL_CONFIG_PATH : 'not found');
-  console.log('  Project config:     ', projectExists ? projectConfigPath : 'not found');
-}
+// ─── Main dispatcher ──────────────────────────────────────────────────────────
 
 const cmd = process.argv[2];
+
 switch (cmd) {
-  case 'install':   install();                        break;
-  case 'uninstall': uninstall();                      break;
-  case 'status':    status();                         break;
-  case 'config':    configCmd(process.argv.slice(3)); break;
+  case 'install':   cmdInstall(process.argv.slice(3));   break;
+  case 'uninstall': cmdUninstall();                      break;
+  case 'status':    cmdStatus();                         break;
+  case 'config':    cmdConfig(process.argv.slice(3));    break;
+  case 'state':     cmdState(process.argv.slice(3));     break;
   default:
-    console.log('Usage: claude-overtime <install|uninstall|status|config>');
-    console.log('       claude-overtime config <init|get|set|validate>');
-    if (cmd && cmd !== '--silent') process.exit(1);
+    process.stdout.write([
+      'Usage: claude-overtime <command> [options]',
+      '',
+      'Commands:',
+      '  install [--dry-run] [--force]            Install hooks and commands into ~/.claude/',
+      '  uninstall                                Remove hooks and commands',
+      '  status                                   Show install state and active sessions',
+      '  config <init|get|set|validate> [...]     Manage configuration',
+      '  state <show|reset> [<id>|--all]          Inspect or reset session state',
+      '',
+      'Config subcommands:',
+      '  config init [--project] [--force]        Scaffold config file with defaults',
+      '  config get [<key>]                       Print merged config or a single key',
+      '  config set <key> <value> [--project]     Set a config key',
+      '  config validate                          Validate config files',
+      '',
+      'State subcommands:',
+      '  state show                               List active sessions',
+      '  state reset --all                        Reset all sessions (restore backups)',
+      '  state reset <session-id>                 Reset one session',
+    ].join('\n') + '\n');
+    if (cmd && cmd !== '--silent' && cmd !== '--help' && cmd !== '-h') process.exit(1);
     break;
 }

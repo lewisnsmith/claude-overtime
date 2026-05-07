@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Mock osascript — logs invocation
+echo "osascript $*" >> "${MOCK_LOG:-/tmp/mock-invocations.log}"
+exit 0
