@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Mock gh — logs invocation, exits 0
+echo "gh $*" >> "${MOCK_LOG:-/tmp/mock-invocations.log}"
+echo "mock-gh: $*" >&2
+exit 0

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Mock caffeinate — logs invocation and sleeps in background
+echo "caffeinate $*" >> "${MOCK_LOG:-/tmp/mock-invocations.log}"
+# Just sleep quietly in the background; exit when killed
+sleep 3600 &
+echo $!
