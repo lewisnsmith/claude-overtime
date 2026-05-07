@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Mock notify-send — logs invocation
+echo "notify-send $*" >> "${MOCK_LOG:-/tmp/mock-invocations.log}"
+exit 0
