@@ -1,12 +1,9 @@
 {
   "name": "claude-overtime",
-  "version": "1.4.0",
-  "description": "Warns when approaching Claude rate limit and auto-continues your session overnight using /overtime or /all-nighter",
+  "version": "2.0.0",
+  "description": "Overnight autonomous Claude Code sessions — idempotent install, rate-limit telemetry, mechanical safety guards",
   "bin": {
     "claude-overtime": "bin/claude-overtime.js"
-  },
-  "scripts": {
-    "postinstall": "node bin/claude-overtime.js install --silent || true"
   },
   "keywords": [
     "claude",
